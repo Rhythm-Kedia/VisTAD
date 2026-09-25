@@ -1,0 +1,48 @@
+# ==============================================================================
+# IE643 TSAD Project Configuration
+# ==============================================================================
+
+# 1. Dataset Configuration
+dataset:
+  name: "smd"               # "smd" (38 channels) | "swat" (51 channels) | "msl" (55 channels) | "gecco" (9 channels)
+  entity: "machine-1-1"     # entity/machine identifier if applicable
+  data_dir: "data"
+  window_size: 200          # L = 200 timesteps (~3.3 minutes at 1 Hz)
+  stride: 100               # S = 100 (50% overlap for training)
+  baseline_steps: 3000      # initial steps to establish nominal mu_0, sigma_0
+
+# 2. Channel Filtering (Top-K)
+channel_filter:
+  strategy: "top_k_zscore"  # "top_k_zscore" | "top_k_variance" | "none"
+  k: 6                      # number of active channels to extract (if D > 6)
+
+# 3. Student Model Architecture
+student:
+  architecture: "cnn_1d"    # "cnn_1d" | "bilstm" | "timesnet"
+  hidden_dim: 128
+  num_layers: 3
+  dropout: 0.1
+  teacher_feat_dim: 2048    # Qwen2.5-VL pooled hidden state dimension
+
+# 4. Training & Distillation Objective
+training:
+  epochs: 30
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  temperature: 2.0          # KD temperature scaling for soft scores
+  device: "cuda"            # "cuda" or "cpu"
+  checkpoint_dir: "checkpoints"
+  
+  # Setting any loss weight to 0.0 disables that objective (clean ablations)
+  loss_weights:
+    w_sup: 1.0              # ground truth anchor loss (BCE on continuous density)
+    w_feat: 0.5             # teacher latent feature alignment (MSE)
+    w_resp: 1.0             # teacher soft likelihood response matching (KL-Div)
+
+# 5. Teacher Offline Caching
+teacher:
+  model_id: "Qwen/Qwen2.5-VL-3B-Instruct"
+  cache_dir: "cache"
+  macro_context_len: 800    # macro historical context steps
+
