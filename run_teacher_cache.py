@@ -90,19 +90,39 @@ def main():
                 "teacher_dense_mask": torch.tensor(dense_mask, dtype=torch.float32)
             }
     else:
-        print("Loading Qwen2.5-VL-3B-Instruct (requires GPU & transformers)...")
+        # Check GPU Availability and Print Diagnostics
+        has_cuda = torch.cuda.is_available()
+        if has_cuda:
+            num_gpus = torch.cuda.device_count()
+            gpu_name = torch.cuda.get_device_name(0)
+            total_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+            print(f"[ACCELERATION] CUDA Active: Found {num_gpus} GPU(s). Primary: {gpu_name} ({total_vram:.2f} GB VRAM)")
+            torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            device_map = "auto"
+        else:
+            print("[ACCELERATION] ⚠️ WARNING: CUDA NOT DETECTED! Running on CPU.")
+            print("[ACCELERATION] In Kaggle, enable GPU via Settings -> Accelerator -> GPU T4 x2 or P100.")
+            torch_dtype = torch.float32
+            device_map = "cpu"
+
+        print(f"Loading {cfg['teacher']['model_id']} with device_map='{device_map}'...")
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
         from qwen_vl_utils import process_vision_info
         
         model_id = cfg["teacher"]["model_id"]
         processor = AutoProcessor.from_pretrained(model_id)
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id, torch_dtype=torch.float16, device_map="auto"
+            model_id, torch_dtype=torch_dtype, device_map=device_map
         )
         model.eval()
         
+        if has_cuda:
+            vram_used = torch.cuda.memory_allocated() / 1e9
+            print(f"[ACCELERATION] Model weights successfully resident in VRAM: {vram_used:.2f} GB")
+        
         ctx_len = cfg["teacher"].get("macro_context_len", 800)
         for i, st in enumerate(curriculum_starts):
+            t_win_start = time.time()
             end = st + w_size
             window_slice = raw_data[st:end]
             
@@ -142,7 +162,11 @@ def main():
             messages = [{"role": "user", "content": [{"type": "image", "image": img_path}, {"type": "text", "text": grounded_prompt}]}]
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             img_in, vid_in = process_vision_info(messages)
-            inputs = processor(text=[text], images=img_in, videos=vid_in, padding=True, return_tensors="pt").to(model.device)
+            inputs = processor(text=[text], images=img_in, videos=vid_in, padding=True, return_tensors="pt")
+            if has_cuda:
+                inputs = inputs.to("cuda")
+            else:
+                inputs = inputs.to(model.device)
             
             with torch.no_grad():
                 gen_ids = model.generate(**inputs, max_new_tokens=200, do_sample=False)
@@ -164,7 +188,8 @@ def main():
             }
             if os.path.exists(img_path):
                 os.remove(img_path)
-            print(f"[{i+1}/{len(curriculum_starts)}] Cached window @ {st}: Score={parsed['anomaly_likelihood']:.2f}, IsAnom={parsed['is_anomaly']} | Reason: {parsed.get('reason', '')[:60]}")
+            elapsed = time.time() - t_win_start
+            print(f"[{i+1}/{len(curriculum_starts)}] Cached window @ {st} in {elapsed:.2f}s: Score={parsed['anomaly_likelihood']:.2f}, IsAnom={parsed['is_anomaly']} | Reason: {parsed.get('reason', '')[:50]}")
 
     torch.save(teacher_cache, cache_file)
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
