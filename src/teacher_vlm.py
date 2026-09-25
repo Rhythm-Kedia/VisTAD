@@ -10,27 +10,33 @@ import torch
 SYSTEM_PROMPT = (
     "You are an expert site reliability engineer (SRE) performing precision time series anomaly detection on server metrics.\n\n"
     "The image contains TWO separate panels:\n"
-    "- PANEL 1 (TOP): Macro historical context. This shows past history to understand normal operating variance, periodic patterns, and established levels. DO NOT flag anomalies occurring ONLY in Panel 1.\n"
-    "- PANEL 2 (BOTTOM): Target window under inspection (relative steps 0 to 200). You are evaluating whether Panel 2 contains an operational anomaly.\n\n"
-    "ANOMALY EVALUATION PRINCIPLES (Compare Panel 2 against Panel 1 history):\n"
-    "1. Routine Periodic Processes (NORMAL): If spikes, pulses, or oscillations in Panel 2 occur with similar rhythm or frequency across Panel 1 (e.g., periodic cron jobs, telemetry polling, or GC spikes), this is NORMAL background behavior, NOT an anomaly.\n"
-    "2. Established Operating Levels (NORMAL): If a signal stabilized at a steady level after an earlier transition in Panel 1, the stabilized level is normal operating behavior.\n"
-    "3. True Operational Anomalies: Abrupt, uncharacteristic, or unprecedented bursts in Panel 2 that have NO precedent in Panel 1, severe multi-sensor divergence, or extreme spikes.\n\n"
+    "- PANEL 1 (TOP): Macro historical context showing past metric behavior. DO NOT flag historical spikes from Panel 1.\n"
+    "- PANEL 2 (BOTTOM): Target window under inspection (relative steps 0 to 200).\n"
+    "  * Solid curves: Actual sensor values for the active channels.\n"
+    "  * Colored dashed lines: Baseline nominal level (μ0).\n"
+    "  * Shaded tolerance bands: Normal operational range (±2.5σ). Curves inside this band are NORMAL.\n\n"
+    "ANOMALY EVALUATION PRINCIPLES:\n"
+    "1. NORMAL OPERATION (is_anomaly: false, likelihood <= 0.15):\n"
+    "   - Curves fluctuate inside or near the shaded ±2.5σ tolerance band.\n"
+    "   - Routine periodic background pulses or stationary noise.\n"
+    "2. TRUE ANOMALY (is_anomaly: true, likelihood >= 0.80):\n"
+    "   - Sudden massive spikes breaking clearly OUTSIDE the ±2.5σ tolerance band.\n"
+    "   - Prolonged severe divergence or uncharacteristic multi-channel disruptions.\n\n"
     "CALIBRATION GUIDELINES:\n"
-    "- 0.00 - 0.20: Normal operation. Signals are stable, oscillate near baseline, or exhibit routine periodic spikes consistent with Panel 1 history.\n"
+    "- 0.00 - 0.20: Normal operation. Curves remain inside the shaded ±2.5σ tolerance band.\n"
     "  --> is_anomaly: false, anomalous_timesteps: [], affected_dimensions: []\n"
-    "- 0.25 - 0.45: Suspicious or mild noise. Transient harmless deviation that quickly recovers.\n"
+    "- 0.25 - 0.45: Suspicious or mild noise. Minor transient deviation that quickly recovers.\n"
     "  --> is_anomaly: false, anomalous_timesteps: [], affected_dimensions: []\n"
-    "- 0.50 - 0.74: Moderate anomaly. Sustained uncharacteristic departure from historical behavior.\n"
+    "- 0.50 - 0.74: Moderate anomaly. Sustained departure breaking out of the tolerance band.\n"
     "  --> is_anomaly: true, anomalous_timesteps: [<start_step>, <end_step>], affected_dimensions: [...]\n"
-    "- 0.75 - 1.00: Severe breakdown or extreme novel spikes. Dramatic uncharacteristic burst or sensor disruption in Panel 2.\n"
+    "- 0.75 - 1.00: Severe breakdown or extreme novel spikes. Dramatic breakout far beyond the tolerance band.\n"
     "  --> is_anomaly: true, anomalous_timesteps: [<start_step>, <end_step>], affected_dimensions: [...]\n\n"
     "CRITICAL CONSTRAINTS:\n"
     "1. Only flag anomalies that are actively occurring in PANEL 2. Do NOT flag historical anomalies from Panel 1.\n"
     "2. 'anomalous_timesteps' must be relative integers strictly within [0, 200]. If no anomaly in Panel 2, use [].\n\n"
     "OUTPUT FORMAT: Return a valid JSON object with this exact key order:\n"
     "{\n"
-    "  \"observation\": \"<one-sentence visual observation comparing Panel 2 curves against Panel 1 historical patterns>\",\n"
+    "  \"observation\": \"<one-sentence observation of whether curves remain inside or break out of the shaded ±2.5σ tolerance band>\",\n"
     "  \"is_anomaly\": <true/false>,\n"
     "  \"anomaly_likelihood\": <float between 0.0 and 1.0>,\n"
     "  \"anomalous_timesteps\": [<start_0_to_200>, <end_0_to_200>],\n"
@@ -63,13 +69,16 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean, base_st
     for i, d in enumerate(dims):
         ax_micro.plot(range(w_len), local_data[:, d], label=f"Dim {d}", color=colors[i], linewidth=1.2)
         ax_micro.axhline(base_mean[d], color=colors[i], linestyle="--", linewidth=0.8, alpha=0.6)
+        if base_std is not None:
+            std_d = base_std[d]
+            ax_micro.fill_between(range(w_len), base_mean[d] - 2.5 * std_d, base_mean[d] + 2.5 * std_d, color=colors[i], alpha=0.08)
             
     ax_micro.set_xlim(0, w_len)
     ax_micro.xaxis.set_major_locator(MultipleLocator(50))
     ax_micro.xaxis.set_minor_locator(MultipleLocator(10))
     ax_micro.grid(True, which="major", linestyle="--", alpha=0.6)
     ax_micro.grid(True, which="minor", linestyle=":", alpha=0.3)
-    ax_micro.set_title(f"PANEL 2: TARGET WINDOW (EVALUATE THIS ONLY, Steps 0 to {w_len}, Colored dashed = Dim Baseline μ0)", fontsize=9, fontweight="bold", color="darkgreen")
+    ax_micro.set_title(f"PANEL 2: TARGET WINDOW (Steps 0 to {w_len}, Shaded = Normal ±2.5σ Band, Excursions = Anomaly)", fontsize=9, fontweight="bold", color="darkgreen")
     ax_micro.set_xlabel(f"Relative Step Index within Target Window (0 - {w_len})", fontsize=8)
     ax_micro.set_ylabel("Val", fontsize=8)
     ax_micro.legend(loc="upper right", ncol=min(4, len(dims)), fontsize=7)
