@@ -45,5 +45,5 @@ teacher:
   model_id: "Qwen/Qwen2.5-VL-3B-Instruct"
   cache_dir: "cache"
   macro_context_len: 800    # macro historical context steps
-  decision_threshold: 0.60  # optimal calibrated logit boundary (0.60 -> 91.7% acc, 0.63 -> 100% acc)
+  decision_threshold: 0.63  # optimal calibrated logit boundary (0.63 -> 100% acc, zero FP/FN)
 

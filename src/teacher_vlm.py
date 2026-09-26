@@ -248,21 +248,23 @@ def parse_vlm_json_output(output_text, window_size=200):
     return parsed
 
 
-def extract_logit_scores_and_features(outputs, inputs, processor=None, temperature=1.0, threshold=0.60,
+def extract_logit_scores_and_features(outputs=None, inputs=None, processor=None, temperature=1.0, threshold=0.63,
                                      window_size=200, active_dims_list=None, w_slices=None,
-                                     base_m=None, base_s=None):
+                                     base_m=None, base_s=None,
+                                     last_logits=None, z_T_batch=None):
     """Extracts calibrated soft probability a_T, pooled z_T, and dense guidance mask in a single pass."""
-    logits = outputs.logits
-    hidden = outputs.hidden_states[-1]
-    attn_mask = inputs.attention_mask
-    B, S, V = logits.shape
-    
-    # Locate last valid non-padded token position for each batch item
-    if (attn_mask[:, -1] == 1).all():
-        last_logits = logits[:, -1, :]
+    if last_logits is None:
+        logits = outputs.logits
+        attn_mask = inputs.attention_mask
+        B, S, V = logits.shape
+        # Locate last valid non-padded token position for each batch item
+        if (attn_mask[:, -1] == 1).all():
+            last_logits = logits[:, -1, :]
+        else:
+            last_pos = attn_mask.sum(dim=1) - 1
+            last_logits = logits[torch.arange(B, device=logits.device), last_pos, :]
     else:
-        last_pos = attn_mask.sum(dim=1) - 1
-        last_logits = logits[torch.arange(B, device=logits.device), last_pos, :]
+        B = last_logits.shape[0]
         
     # Affirmative and negative token IDs in Qwen2/Qwen2.5-VL vocab
     # 14004: 'YES', 9454: 'Yes', 14080: ' YES', 7414: ' Yes'
@@ -288,8 +290,11 @@ def extract_logit_scores_and_features(outputs, inputs, processor=None, temperatu
     a_T_batch = torch.sigmoid(logit_diff).float().cpu()
     
     # Multimodal feature pooling over prompt attention mask
-    mask_expanded = attn_mask.unsqueeze(-1).to(dtype=hidden.dtype)
-    z_T_batch = ((hidden * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1.0)).float().cpu()
+    if z_T_batch is None:
+        hidden = outputs.hidden_states[-1]
+        attn_mask = inputs.attention_mask
+        mask_expanded = attn_mask.unsqueeze(-1).to(dtype=hidden.dtype)
+        z_T_batch = ((hidden * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1.0)).float().cpu()
     
     results = []
     for b in range(B):

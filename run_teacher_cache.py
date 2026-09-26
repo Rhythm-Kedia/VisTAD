@@ -16,6 +16,7 @@ def parse_args():
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--num_windows", type=int, default=50, help="Number of curriculum windows to cache")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for parallel VLM teacher inference")
+    parser.add_argument("--threshold", type=float, default=None, help="Decision threshold for logit classification (overrides config)")
     parser.add_argument("--mock", action="store_true", help="Generate mock teacher cache without loading 3B model (for fast testing)")
     return parser.parse_args()
 
@@ -155,7 +156,7 @@ def main():
             print(f"[ACCELERATION] Model weights successfully resident in VRAM: {vram_used:.2f} GB")
         
         ctx_len = cfg["teacher"].get("macro_context_len", 800)
-        decision_threshold = cfg["teacher"].get("decision_threshold", 0.60)
+        decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
         pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
         print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}, threshold={decision_threshold}).")
         
@@ -228,17 +229,35 @@ def main():
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
             with torch.inference_mode():
-                outputs = model(**inputs, output_hidden_states=True)
+                # 1. Base transformer backbone pass (retains only the single last hidden layer)
+                base_outputs = model.model(**inputs)
+                last_hidden = base_outputs[0]  # shape: (B, S, D)
+
+                # 2. Multimodal feature pooling over prompt attention mask
+                mask_expanded = inputs.attention_mask.unsqueeze(-1).to(dtype=last_hidden.dtype)
+                z_T_batch = ((last_hidden * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1.0)).float().cpu()
+
+                # 3. Locate and slice ONLY the single last valid token position
+                if (inputs.attention_mask[:, -1] == 1).all():
+                    last_token_hidden = last_hidden[:, -1:, :]
+                else:
+                    last_pos = inputs.attention_mask.sum(dim=1) - 1
+                    last_token_hidden = last_hidden[torch.arange(len(last_hidden), device=last_hidden.device), last_pos:last_pos+1, :]
+
+                # 4. Project ONLY the single last token through lm_head (2.4 MB vs 2.22 GB, eliminates OOM & 31s latency)
+                last_logits = model.lm_head(last_token_hidden).squeeze(1)
+
             if has_cuda:
                 torch.cuda.synchronize()
             t_gpu = (time.perf_counter() - t0) * 1000
             
             t0 = time.perf_counter()
             batch_results = extract_logit_scores_and_features(
-                outputs, inputs, processor=processor,
+                inputs=inputs, processor=processor,
                 temperature=1.0, threshold=decision_threshold, window_size=w_size,
                 active_dims_list=batch_top_dims, w_slices=batch_windows,
-                base_m=base_m, base_s=base_s
+                base_m=base_m, base_s=base_s,
+                last_logits=last_logits, z_T_batch=z_T_batch
             )
             
             for i_b, st in enumerate(batch_starts):
