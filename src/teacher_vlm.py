@@ -9,35 +9,35 @@ import torch
 
 SYSTEM_PROMPT = (
     "You are an expert site reliability engineer (SRE) performing precision time series anomaly detection on server metrics.\n\n"
-    "The image contains TWO separate panels:\n"
-    "- PANEL 1 (TOP): Macro historical context showing past metric behavior. DO NOT flag historical spikes from Panel 1.\n"
-    "- PANEL 2 (BOTTOM): Target window under inspection (relative steps 0 to 200).\n"
+    "The image displays TWO panels for multi-horizon comparative diagnosis:\n"
+    "- PANEL 1 (TOP): Macro historical context showing the metric baseline rhythm over past history. DO NOT flag historical spikes in Panel 1.\n"
+    "- PANEL 2 (BOTTOM): Target candidate window under inspection (relative steps 0 to 200).\n"
     "  * Solid curves: Actual sensor values for the active channels.\n"
     "  * Colored dashed lines: Baseline nominal level (μ0).\n"
-    "  * Shaded tolerance bands: Normal operational range (±2.5σ). Curves inside this band are NORMAL.\n\n"
-    "ANOMALY EVALUATION PRINCIPLES:\n"
+    "  * Shaded tolerance bands: Reference operational range (±2.5σ).\n\n"
+    "COMPARATIVE SRE DIAGNOSTIC CRITERIA:\n"
     "1. NORMAL OPERATION (is_anomaly: false, likelihood <= 0.15):\n"
-    "   - Curves fluctuate inside or near the shaded ±2.5σ tolerance band.\n"
-    "   - Routine periodic background pulses or stationary noise.\n"
+    "   - Recurring periodic pulses, duty cycles, or heartbeat spikes in Panel 2 that MATCH the rhythm, height, or shape already present throughout Panel 1.\n"
+    "   - Stationary background noise or temporary fluctuations that conform to the historical baseline.\n"
     "2. TRUE ANOMALY (is_anomaly: true, likelihood >= 0.80):\n"
-    "   - Sudden massive spikes breaking clearly OUTSIDE the ±2.5σ tolerance band.\n"
-    "   - Prolonged severe divergence or uncharacteristic multi-channel disruptions.\n\n"
+    "   - UNPRECEDENTED DISRUPTION: Massive novel spikes, sudden multi-sensor collapse, or prolonged step shifts that NEVER occurred in Panel 1.\n"
+    "   - Significant breakdown of the recurring pattern established in Panel 1.\n\n"
     "CALIBRATION GUIDELINES:\n"
-    "- 0.00 - 0.20: Normal operation. Curves remain inside the shaded ±2.5σ tolerance band.\n"
+    "- 0.00 - 0.20: Normal operation. Conforms to historical rhythm in Panel 1 or stays inside nominal noise.\n"
     "  --> is_anomaly: false, anomalous_timesteps: [], affected_dimensions: []\n"
-    "- 0.25 - 0.45: Suspicious or mild noise. Minor transient deviation that quickly recovers.\n"
+    "- 0.25 - 0.45: Suspicious or mild noise. Minor transient deviation that quickly recovers to historical pattern.\n"
     "  --> is_anomaly: false, anomalous_timesteps: [], affected_dimensions: []\n"
-    "- 0.50 - 0.74: Moderate anomaly. Sustained departure breaking out of the tolerance band.\n"
+    "- 0.50 - 0.74: Moderate anomaly. Sustained departure or novel disturbance breaking the historical rhythm.\n"
     "  --> is_anomaly: true, anomalous_timesteps: [<start_step>, <end_step>], affected_dimensions: [...]\n"
-    "- 0.75 - 1.00: Severe breakdown or extreme novel spikes. Dramatic breakout far beyond the tolerance band.\n"
+    "- 0.75 - 1.00: Severe anomaly. Extreme unprecedented breakout or multi-channel systemic breakdown absent in Panel 1.\n"
     "  --> is_anomaly: true, anomalous_timesteps: [<start_step>, <end_step>], affected_dimensions: [...]\n\n"
     "CRITICAL CONSTRAINTS:\n"
-    "1. Only flag anomalies that are actively occurring in PANEL 2. Do NOT flag historical anomalies from Panel 1.\n"
+    "1. Only flag anomalies actively occurring in PANEL 2. Never flag past events from Panel 1.\n"
     "2. 'anomalous_timesteps' must be relative integers strictly within [0, 200]. If no anomaly in Panel 2, use [].\n\n"
     "OUTPUT FORMAT: Return a valid JSON object with this exact key order:\n"
     "{\n"
-    "  \"observation\": \"<one-sentence observation of whether curves remain inside or break out of the shaded ±2.5σ tolerance band>\",\n"
-    "  \"is_anomaly\": <true/false>,\n"
+    "  \"macro_comparison\": \"<Compare Panel 2 with Panel 1: Does Panel 2 match the recurring historical rhythm/amplitude of Panel 1, or is it an unprecedented disruption?>\",\n"
+    "  \"is_anomaly\": <true ONLY if Panel 2 shows unprecedented disruption absent in Panel 1, else false>,\n"
     "  \"anomaly_likelihood\": <float between 0.0 and 1.0>,\n"
     "  \"anomalous_timesteps\": [<start_0_to_200>, <end_0_to_200>],\n"
     "  \"affected_dimensions\": [\"Dim X\", ...]\n"
@@ -78,7 +78,7 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean, base_st
     ax_micro.xaxis.set_minor_locator(MultipleLocator(10))
     ax_micro.grid(True, which="major", linestyle="--", alpha=0.6)
     ax_micro.grid(True, which="minor", linestyle=":", alpha=0.3)
-    ax_micro.set_title(f"PANEL 2: TARGET WINDOW (Steps 0 to {w_len}, Shaded = Normal ±2.5σ Band, Excursions = Anomaly)", fontsize=9, fontweight="bold", color="darkgreen")
+    ax_micro.set_title(f"PANEL 2: TARGET WINDOW (Steps 0 to {w_len}, Shaded = Normal ±2.5σ Band)", fontsize=9, fontweight="bold", color="darkgreen")
     ax_micro.set_xlabel(f"Relative Step Index within Target Window (0 - {w_len})", fontsize=8)
     ax_micro.set_ylabel("Val", fontsize=8)
     ax_micro.legend(loc="upper right", ncol=min(4, len(dims)), fontsize=7)
@@ -103,8 +103,8 @@ def parse_vlm_json_output(output_text, window_size=200):
         
     try:
         parsed = json.loads(clean_str)
-        if "reason" not in parsed and "observation" in parsed:
-            parsed["reason"] = parsed["observation"]
+        if "reason" not in parsed:
+            parsed["reason"] = parsed.get("macro_comparison", parsed.get("observation", ""))
     except Exception:
         is_anom_match = re.search(r'"is_anomaly"\s*:\s*(true|false)', clean_str, re.IGNORECASE)
         is_anom = (is_anom_match.group(1).lower() == "true") if is_anom_match else False
@@ -130,9 +130,14 @@ def parse_vlm_json_output(output_text, window_size=200):
         if dims_match and dims_match.group(1).strip():
             dims = [d.strip().strip('"').strip("'") for d in dims_match.group(1).split(",") if d.strip()]            
         
+        comp_match = re.search(r'"macro_comparison"\s*:\s*"([^"]*)', clean_str)
         obs_match = re.search(r'"observation"\s*:\s*"([^"]*)', clean_str)
         reason_match = re.search(r'"reason"\s*:\s*"([^"]*)', clean_str)
-        reason = obs_match.group(1) if obs_match else (reason_match.group(1) if reason_match else clean_str[:80])
+        reason = (
+            comp_match.group(1) if comp_match
+            else (obs_match.group(1) if obs_match
+            else (reason_match.group(1) if reason_match else clean_str[:80]))
+        )
         
         parsed = {
             "is_anomaly": is_anom,

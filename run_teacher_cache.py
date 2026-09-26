@@ -64,11 +64,18 @@ def main():
     
     print(f"Selected {len(curriculum_starts)} balanced curriculum windows for teacher caching.")
     
-    teacher_cache = {}
+    if os.path.exists(cache_file):
+        print(f"Found existing teacher cache at {cache_file}. Loading to resume...")
+        teacher_cache = torch.load(cache_file)
+        print(f"Loaded {len(teacher_cache)} existing cached windows.")
+    else:
+        teacher_cache = {}
     
     if args.mock:
         print("Running in MOCK mode: Simulating teacher outputs for pipeline validation...")
         for st in curriculum_starts:
+            if st in teacher_cache:
+                continue
             end = st + w_size
             gt_w = labels[st:end]
             has_anom = bool(np.any(gt_w == 1))
@@ -89,6 +96,7 @@ def main():
                 "reason": "Simulated teacher SRE diagnosis",
                 "teacher_dense_mask": torch.tensor(dense_mask, dtype=torch.float32)
             }
+            torch.save(teacher_cache, cache_file)
     else:
         # Check GPU Availability and Print Diagnostics
         has_cuda = torch.cuda.is_available()
@@ -122,6 +130,10 @@ def main():
         
         ctx_len = cfg["teacher"].get("macro_context_len", 800)
         for i, st in enumerate(curriculum_starts):
+            if st in teacher_cache:
+                print(f"[{i+1}/{len(curriculum_starts)}] Window @ {st} already cached. Skipping.")
+                continue
+
             t_win_start = time.time()
             end = st + w_size
             window_slice = raw_data[st:end]
@@ -149,13 +161,13 @@ def main():
                 ctx_len=ctx_len
             )
             
-            # multimodal grounding: provide explicit active channel names and statistical bounds
+            # multimodal grounding: provide explicit active channel names and comparative guidance
             grounded_prompt = (
                 f"{SYSTEM_PROMPT}\n\n"
                 f"CURRENT WINDOW DIAGNOSTIC TELEMETRY:\n"
                 f"- Active Channels Plotted in Canvas: {channel_names}\n"
                 f"- Peak Deviation in Target Window: {max_z:.2f} standard deviations (σ) from nominal baseline.\n"
-                f"- SRE Normality Criterion: Departures under 2.5σ are routine server noise (is_anomaly: false, likelihood <= 0.15). Departures above 3.0σ with clear visual spikes or sustained divergence indicate true anomalies.\n"
+                f"- Comparative Guidance: Periodic pulses, sawtooth rhythms, or baseline spikes that recur in Panel 1 are normal operational telemetry (is_anomaly: false, likelihood <= 0.15). Only flag an anomaly if Panel 2 exhibits an unprecedented disruption absent in Panel 1.\n"
                 f"- Strictly report affected_dimensions ONLY from {channel_names}."
             )
             
@@ -186,12 +198,13 @@ def main():
                 "reason": parsed.get("reason", ""),
                 "teacher_dense_mask": parsed.get("teacher_dense_mask", torch.zeros(w_size, dtype=torch.float32))
             }
+            # persist incrementally after each window so progress is never lost
+            torch.save(teacher_cache, cache_file)
             if os.path.exists(img_path):
                 os.remove(img_path)
             elapsed = time.time() - t_win_start
             print(f"[{i+1}/{len(curriculum_starts)}] Cached window @ {st} in {elapsed:.2f}s: Score={parsed['anomaly_likelihood']:.2f}, IsAnom={parsed['is_anomaly']} | Reason: {parsed.get('reason', '')[:50]}")
 
-    torch.save(teacher_cache, cache_file)
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@ class DistillationTrainer:
         num_batches = len(dataloader)
         
         for batch in dataloader:
-            x = batch["x"].to(self.device)  # [B, C, L]
+            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            x = batch["x"]
             
             self.optimizer.zero_grad()
             outputs = self.model(x)
@@ -48,7 +49,8 @@ class DistillationTrainer:
         
         with torch.no_grad():
             for batch in dataloader:
-                x = batch["x"].to(self.device)
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                x = batch["x"]
                 outputs = self.model(x)
                 loss, _ = self.loss_fn(outputs, batch)
                 total_loss += loss.item()
