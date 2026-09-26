@@ -155,16 +155,18 @@ def main():
             print(f"[ACCELERATION] Model weights successfully resident in VRAM: {vram_used:.2f} GB")
         
         ctx_len = cfg["teacher"].get("macro_context_len", 800)
+        decision_threshold = cfg["teacher"].get("decision_threshold", 0.60)
         pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
-        print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}).")
+        print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}, threshold={decision_threshold}).")
         
         for b_idx in range(0, len(pending_starts), args.batch_size):
-            t_batch_start = time.time()
+            t_batch_start = time.perf_counter()
             batch_starts = pending_starts[b_idx : b_idx + args.batch_size]
             batch_messages = []
             batch_windows = []
             batch_top_dims = []
             
+            t0 = time.perf_counter()
             for st in batch_starts:
                 end = st + w_size
                 window_slice = raw_data[st:end]
@@ -213,19 +215,28 @@ def main():
                     {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
                     {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": grounded_prompt}]}
                 ])
+            t_plot = (time.perf_counter() - t0) * 1000
 
+            t0 = time.perf_counter()
             texts = [processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in batch_messages]
             image_inputs, video_inputs = process_vision_info(batch_messages)
             inputs = processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
             inputs = inputs.to(primary_device)
+            t_prep = (time.perf_counter() - t0) * 1000
             
+            if has_cuda:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
             with torch.inference_mode():
-                # Single prefill forward pass: zero autoregressive decoding steps
                 outputs = model(**inputs, output_hidden_states=True)
-                
+            if has_cuda:
+                torch.cuda.synchronize()
+            t_gpu = (time.perf_counter() - t0) * 1000
+            
+            t0 = time.perf_counter()
             batch_results = extract_logit_scores_and_features(
                 outputs, inputs, processor=processor,
-                temperature=1.0, threshold=0.50, window_size=w_size,
+                temperature=1.0, threshold=decision_threshold, window_size=w_size,
                 active_dims_list=batch_top_dims, w_slices=batch_windows,
                 base_m=base_m, base_s=base_s
             )
@@ -235,10 +246,13 @@ def main():
                 
             # persist incrementally after each batch
             torch.save(teacher_cache, cache_file)
-            b_elapsed = time.time() - t_batch_start
+            t_ext_save = (time.perf_counter() - t0) * 1000
+            
+            b_elapsed = time.perf_counter() - t_batch_start
             per_w = b_elapsed / len(batch_starts)
             done_count = len(teacher_cache)
-            print(f"[{done_count}/{len(curriculum_starts)}] Cached batch of {len(batch_starts)} windows ({batch_starts}) in {b_elapsed:.2f}s ({per_w:.2f}s/window).")
+            print(f"[{done_count}/{len(curriculum_starts)}] Cached batch of {len(batch_starts)} windows in {b_elapsed:.2f}s ({per_w:.2f}s/w) | "
+                  f"Plot: {t_plot:.0f}ms | Prep: {t_prep:.0f}ms | GPU: {t_gpu:.0f}ms | Ext/Save: {t_ext_save:.0f}ms")
 
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
 

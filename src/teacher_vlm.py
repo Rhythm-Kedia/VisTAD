@@ -101,12 +101,9 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, ba
         ax.set_ylim(min(y_min, -4.0), max(y_max, 4.0))
     
     plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=90, bbox_inches="tight")
-    buf.seek(0)
-    img = Image.open(buf)
-    img.load()
-    buf.close()
+    fig.canvas.draw()
+    rgba_arr = np.asarray(fig.canvas.buffer_rgba())
+    img = Image.fromarray(rgba_arr[:, :, :3])
     plt.close(fig)
     if save_path:
         img.save(save_path)
@@ -251,7 +248,7 @@ def parse_vlm_json_output(output_text, window_size=200):
     return parsed
 
 
-def extract_logit_scores_and_features(outputs, inputs, processor=None, temperature=1.0, threshold=0.50,
+def extract_logit_scores_and_features(outputs, inputs, processor=None, temperature=1.0, threshold=0.60,
                                      window_size=200, active_dims_list=None, w_slices=None,
                                      base_m=None, base_s=None):
     """Extracts calibrated soft probability a_T, pooled z_T, and dense guidance mask in a single pass."""
