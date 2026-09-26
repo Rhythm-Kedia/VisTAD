@@ -8,80 +8,61 @@ from matplotlib.ticker import MultipleLocator
 import torch
 
 SYSTEM_PROMPT = (
-    "You are an expert site reliability engineer (SRE) performing precision time series anomaly detection on server metrics.\n\n"
-    "The image displays TWO panels for multi-horizon comparative diagnosis:\n"
-    "- PANEL 1 (TOP): Macro historical context showing the metric baseline rhythm over past history. DO NOT flag historical spikes in Panel 1.\n"
-    "- PANEL 2 (BOTTOM): Target candidate window under inspection (relative steps 0 to 200).\n"
-    "  * Solid curves: Actual sensor values for the active channels.\n"
-    "  * Colored dashed lines: Baseline nominal level (μ0).\n"
-    "  * Shaded tolerance bands: Reference operational range (±2.5σ).\n\n"
-    "COMPARATIVE SRE DIAGNOSTIC CRITERIA:\n"
-    "1. NORMAL OPERATION (is_anomaly: false, likelihood <= 0.15):\n"
+    "You are an expert time-series analyst performing precision anomaly detection on server metrics.\n"
+    "You are provided a 2-panel line plot:\n"
+    "- PANEL 1 (TOP): Prior historical context showing baseline behavior and recurring patterns over the past 800 steps BEFORE the candidate window.\n"
+    "- PANEL 2 (BOTTOM): Candidate target window under inspection (relative steps 0 to 200).\n\n"
+    "DIAGNOSTIC PRINCIPLES (Following VLM4TS Expert Guidelines):\n"
+    "1. NORMAL BEHAVIOR (anomaly_confidence: 1, anomaly_likelihood: 0.00 - 0.15):\n"
     "   - Recurring periodic pulses, duty cycles, or heartbeat spikes in Panel 2 that MATCH the rhythm, height, or shape already present throughout Panel 1.\n"
-    "   - Stationary background noise or temporary fluctuations that conform to the historical baseline.\n"
-    "2. TRUE ANOMALY (is_anomaly: true, likelihood >= 0.80):\n"
-    "   - UNPRECEDENTED DISRUPTION: Massive novel spikes, sudden multi-sensor collapse, or prolonged step shifts that NEVER occurred in Panel 1.\n"
-    "   - Significant breakdown of the recurring pattern established in Panel 1.\n\n"
-    "CALIBRATION GUIDELINES:\n"
-    "- 0.00 - 0.20: Normal operation. Conforms to historical rhythm in Panel 1 or stays inside nominal noise.\n"
-    "  --> is_anomaly: false, anomalous_timesteps: [], affected_dimensions: []\n"
-    "- 0.25 - 0.45: Suspicious or mild noise. Minor transient deviation that quickly recovers to historical pattern.\n"
-    "  --> is_anomaly: false, anomalous_timesteps: [], affected_dimensions: []\n"
-    "- 0.50 - 0.74: Moderate anomaly. Sustained departure or novel disturbance breaking the historical rhythm.\n"
-    "  --> is_anomaly: true, anomalous_timesteps: [<start_step>, <end_step>], affected_dimensions: [...]\n"
-    "- 0.75 - 1.00: Severe anomaly. Extreme unprecedented breakout or multi-channel systemic breakdown absent in Panel 1.\n"
-    "  --> is_anomaly: true, anomalous_timesteps: [<start_step>, <end_step>], affected_dimensions: [...]\n\n"
-    "CRITICAL CONSTRAINTS:\n"
-    "1. Only flag anomalies actively occurring in PANEL 2. Never flag past events from Panel 1.\n"
-    "2. 'anomalous_timesteps' must be relative integers strictly within [0, 200]. If no anomaly in Panel 2, use [].\n\n"
-    "OUTPUT FORMAT: Return a valid JSON object with this exact key order:\n"
+    "   - Minor isolated noise or stationary fluctuations consistent with the historical baseline.\n"
+    "2. TRUE ANOMALY (anomaly_confidence: 2 or 3, anomaly_likelihood: 0.70 - 1.00):\n"
+    "   - Coordinated multi-sensor disruptions occurring simultaneously across multiple channels.\n"
+    "   - Unprecedented severe spikes, sudden level shifts, or abrupt turbulence in Panel 2 that NEVER occurred anywhere in Panel 1.\n\n"
+    "Respond ONLY with a valid JSON object:\n"
     "{\n"
-    "  \"macro_comparison\": \"<Compare Panel 2 with Panel 1: Does Panel 2 match the recurring historical rhythm/amplitude of Panel 1, or is it an unprecedented disruption?>\",\n"
-    "  \"is_anomaly\": <true ONLY if Panel 2 shows unprecedented disruption absent in Panel 1, else false>,\n"
-    "  \"anomaly_likelihood\": <float between 0.0 and 1.0>,\n"
-    "  \"anomalous_timesteps\": [<start_0_to_200>, <end_0_to_200>],\n"
+    "  \"temporal_continuity_analysis\": \"<1-2 sentences comparing Panel 2 to Panel 1: Does Panel 2 follow the established historical rhythm, or is it an unprecedented disruption?>\",\n"
+    "  \"anomaly_confidence\": <1 (normal/ambiguous), 2 (moderate anomaly), or 3 (high confidence anomaly)>,\n"
+    "  \"anomaly_likelihood\": <float 0.00 to 1.00>,\n"
+    "  \"is_anomaly\": <true only if anomaly_confidence >= 2, else false>,\n"
+    "  \"anomalous_timesteps\": [<start_step>, <end_step>],\n"
     "  \"affected_dimensions\": [\"Dim X\", ...]\n"
     "}"
 )
 
 
-def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean, base_std=None, save_path="temp_dual.png", ctx_len=800):
-    """Renders dual-horizon canvas with explicit panel demarcation and matching baseline colors."""
+def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, base_std=None, save_path="temp_dual.png", ctx_len=800):
+    """Renders dual-horizon canvas where Panel 1 is strictly prior history and curves are uncluttered."""
     ctx_start = max(0, start_idx - ctx_len)
-    ctx_data = data[ctx_start:end_idx]
+    # strictly prior history up to start_idx to prevent target window leakage into the reference panel
+    ctx_data = data[ctx_start:start_idx]
     local_data = data[start_idx:end_idx]
     w_len = len(local_data)
     
-    fig, (ax_macro, ax_micro) = plt.subplots(2, 1, figsize=(8.5, 5.0), dpi=100, gridspec_kw={"height_ratios": [1, 1.4]})
-    
-    # top panel: macro context (read-only reference)
+    fig, (ax_macro, ax_micro) = plt.subplots(2, 1, figsize=(9.0, 5.2), dpi=100, gridspec_kw={"height_ratios": [1, 1.3]})
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(dims), 1)))
-    for i, d in enumerate(dims):
-        ax_macro.plot(range(len(ctx_data)), ctx_data[:, d], label=f"Dim {d}", color=colors[i], linewidth=0.9, alpha=0.8)
-    loc_start = start_idx - ctx_start
-    ax_macro.axvspan(loc_start, loc_start + w_len, color="gold", alpha=0.35, label="Target Window Location")
-    ax_macro.set_title("PANEL 1: MACRO CONTEXT (Past History - READ ONLY REFERENCE, DO NOT FLAG)", fontsize=9, fontweight="bold", color="darkred")
-    ax_macro.grid(True, linestyle=":", alpha=0.5)
-    ax_macro.set_ylabel("Val", fontsize=8)
-    ax_macro.set_xlabel("Historical Timesteps (Past Reference)", fontsize=8)
     
-    # bottom panel: micro target window
+    # top panel: strictly prior historical context (reference baseline)
     for i, d in enumerate(dims):
-        ax_micro.plot(range(w_len), local_data[:, d], label=f"Dim {d}", color=colors[i], linewidth=1.2)
-        ax_micro.axhline(base_mean[d], color=colors[i], linestyle="--", linewidth=0.8, alpha=0.6)
-        if base_std is not None:
-            std_d = base_std[d]
-            ax_micro.fill_between(range(w_len), base_mean[d] - 2.5 * std_d, base_mean[d] + 2.5 * std_d, color=colors[i], alpha=0.08)
-            
+        ax_macro.plot(range(len(ctx_data)), ctx_data[:, d], label=f"Dim {d}", color=colors[i], linewidth=0.9, alpha=0.85)
+    ax_macro.set_xlim(0, max(1, len(ctx_data)))
+    ax_macro.set_title("PANEL 1: PRIOR HISTORICAL CONTEXT (Past 800 Steps BEFORE Target Window - Baseline)", fontsize=9, fontweight="bold", color="navy")
+    ax_macro.grid(True, linestyle=":", alpha=0.5)
+    ax_macro.set_ylabel("Signal", fontsize=8)
+    ax_macro.set_xlabel("Historical Time Steps Prior to Target Window", fontsize=8)
+    ax_macro.legend(loc="upper right", ncol=min(6, len(dims)), fontsize=7)
+    
+    # bottom panel: candidate target window under inspection
+    for i, d in enumerate(dims):
+        ax_micro.plot(range(w_len), local_data[:, d], label=f"Dim {d}", color=colors[i], linewidth=1.3)
     ax_micro.set_xlim(0, w_len)
     ax_micro.xaxis.set_major_locator(MultipleLocator(50))
     ax_micro.xaxis.set_minor_locator(MultipleLocator(10))
     ax_micro.grid(True, which="major", linestyle="--", alpha=0.6)
     ax_micro.grid(True, which="minor", linestyle=":", alpha=0.3)
-    ax_micro.set_title(f"PANEL 2: TARGET WINDOW (Steps 0 to {w_len}, Shaded = Normal ±2.5σ Band)", fontsize=9, fontweight="bold", color="darkgreen")
+    ax_micro.set_title(f"PANEL 2: CANDIDATE TARGET WINDOW UNDER INSPECTION (Steps 0 to {w_len})", fontsize=9, fontweight="bold", color="darkgreen")
     ax_micro.set_xlabel(f"Relative Step Index within Target Window (0 - {w_len})", fontsize=8)
-    ax_micro.set_ylabel("Val", fontsize=8)
-    ax_micro.legend(loc="upper right", ncol=min(4, len(dims)), fontsize=7)
+    ax_micro.set_ylabel("Signal", fontsize=8)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=100, bbox_inches="tight")
@@ -104,14 +85,28 @@ def parse_vlm_json_output(output_text, window_size=200):
     try:
         parsed = json.loads(clean_str)
         if "reason" not in parsed:
-            parsed["reason"] = parsed.get("macro_comparison", parsed.get("observation", ""))
+            parsed["reason"] = (
+                parsed.get("temporal_continuity_analysis")
+                or parsed.get("macro_comparison")
+                or parsed.get("observation", "")
+            )
     except Exception:
+        conf_match = re.search(r'"anomaly_confidence"\s*:\s*([1-3])', clean_str)
+        conf = int(conf_match.group(1)) if conf_match else None
+        
         is_anom_match = re.search(r'"is_anomaly"\s*:\s*(true|false)', clean_str, re.IGNORECASE)
-        is_anom = (is_anom_match.group(1).lower() == "true") if is_anom_match else False
+        if is_anom_match:
+            is_anom = (is_anom_match.group(1).lower() == "true")
+        elif conf is not None:
+            is_anom = (conf >= 2)
+        else:
+            is_anom = False
         
         likelihood_match = re.search(r'"anomaly_likelihood"\s*:\s*([0-9.]+)', clean_str)
         if likelihood_match:
             likelihood = float(likelihood_match.group(1))
+        elif conf is not None:
+            likelihood = 0.95 if conf == 3 else (0.75 if conf == 2 else 0.05)
         else:
             likelihood = 0.75 if is_anom else 0.05
             
@@ -130,22 +125,36 @@ def parse_vlm_json_output(output_text, window_size=200):
         if dims_match and dims_match.group(1).strip():
             dims = [d.strip().strip('"').strip("'") for d in dims_match.group(1).split(",") if d.strip()]            
         
+        analysis_match = re.search(r'"temporal_continuity_analysis"\s*:\s*"([^"]*)', clean_str)
         comp_match = re.search(r'"macro_comparison"\s*:\s*"([^"]*)', clean_str)
         obs_match = re.search(r'"observation"\s*:\s*"([^"]*)', clean_str)
-        reason_match = re.search(r'"reason"\s*:\s*"([^"]*)', clean_str)
         reason = (
-            comp_match.group(1) if comp_match
-            else (obs_match.group(1) if obs_match
-            else (reason_match.group(1) if reason_match else clean_str[:80]))
+            analysis_match.group(1) if analysis_match
+            else (comp_match.group(1) if comp_match
+            else (obs_match.group(1) if obs_match else clean_str[:80]))
         )
         
         parsed = {
             "is_anomaly": is_anom,
+            "anomaly_confidence": conf,
             "anomaly_likelihood": likelihood,
             "anomalous_timesteps": times,
             "affected_dimensions": dims,
             "reason": reason
         }
+
+    # calibrate boolean flag with confidence if provided
+    if "anomaly_confidence" in parsed and parsed["anomaly_confidence"] is not None:
+        try:
+            c = int(parsed["anomaly_confidence"])
+            if c == 1:
+                parsed["is_anomaly"] = False
+                parsed["anomaly_likelihood"] = min(parsed.get("anomaly_likelihood", 0.0), 0.15)
+            elif c >= 2:
+                parsed["is_anomaly"] = True
+                parsed["anomaly_likelihood"] = max(parsed.get("anomaly_likelihood", 0.70), 0.70)
+        except (ValueError, TypeError):
+            pass
 
     # clamp likelihood
     parsed["anomaly_likelihood"] = float(np.clip(parsed.get("anomaly_likelihood", 0.0), 0.0, 1.0))
@@ -160,8 +169,8 @@ def parse_vlm_json_output(output_text, window_size=200):
     timesteps = parsed.get("anomalous_timesteps", [])
     valid_ts = []
     if parsed["is_anomaly"] and isinstance(timesteps, list) and len(timesteps) >= 2:
-        t0 = int(np.clip(timesteps[0], 0, window_size))
-        t1 = int(np.clip(timesteps[1], 0, window_size))
+        t0 = int(np.clip(min(timesteps), 0, window_size))
+        t1 = int(np.clip(max(timesteps), 0, window_size))
         if t0 < t1:
             valid_ts = [t0, t1]
         elif t1 < t0:

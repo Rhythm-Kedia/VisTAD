@@ -164,10 +164,9 @@ def main():
             # multimodal grounding: provide explicit active channel names and comparative guidance
             grounded_prompt = (
                 f"{SYSTEM_PROMPT}\n\n"
-                f"CURRENT WINDOW DIAGNOSTIC TELEMETRY:\n"
+                f"CURRENT WINDOW TELEMETRY INFO:\n"
                 f"- Active Channels Plotted in Canvas: {channel_names}\n"
-                f"- Peak Deviation in Target Window: {max_z:.2f} standard deviations (σ) from nominal baseline.\n"
-                f"- Comparative Guidance: Periodic pulses, sawtooth rhythms, or baseline spikes that recur in Panel 1 are normal operational telemetry (is_anomaly: false, likelihood <= 0.15). Only flag an anomaly if Panel 2 exhibits an unprecedented disruption absent in Panel 1.\n"
+                f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If pulses, sawtooth rhythms, or baseline spikes recur in Panel 1, they are normal operational telemetry (confidence: 1, likelihood <= 0.15). Only flag an anomaly if Panel 2 exhibits an unprecedented disruption or coordinated multi-channel breakdown absent in Panel 1.\n"
                 f"- Strictly report affected_dimensions ONLY from {channel_names}."
             )
             
