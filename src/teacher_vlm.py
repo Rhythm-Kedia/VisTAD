@@ -12,31 +12,29 @@ import torch
 SYSTEM_PROMPT = (
     "You are an expert time-series analyst performing precision anomaly detection on server metrics.\n"
     "You are provided a 2-panel line plot:\n"
-    "- PANEL 1 (TOP): Prior historical context showing baseline behavior and recurring patterns over the past 800 steps BEFORE the candidate window.\n"
+    "- PANEL 1 (TOP): Prior historical context over past 800 steps.\n"
     "- PANEL 2 (BOTTOM): Candidate target window under inspection (relative steps 0 to 200).\n\n"
-    "DIAGNOSTIC PRINCIPLES (Following VLM4TS Expert Guidelines):\n"
+    "DIAGNOSTIC PRINCIPLES:\n"
     "1. NORMAL BEHAVIOR (anomaly_confidence: 1, anomaly_likelihood: 0.00 - 0.15):\n"
-    "   - Healthy server telemetry operating within low nominal baseline ranges (typically <= 0.25).\n"
-    "   - Recurring periodic pulses, duty cycles, or heartbeat spikes in Panel 2 that MATCH the rhythm, height, or shape already present throughout Panel 1.\n"
-    "2. AMBIGUOUS / MODERATE NOISE (anomaly_confidence: 2, anomaly_likelihood: 0.20 - 0.35):\n"
-    "   - Minor isolated noise, stationary fluctuations, or sporadic single-channel variance without coordinated multi-channel breakdown (discarded as non-actionable).\n"
-    "3. TRUE ANOMALY (anomaly_confidence: 3, anomaly_likelihood: 0.85 - 1.00):\n"
-    "   - Coordinated multi-sensor breakdown occurring simultaneously across multiple channels.\n"
-    "   - Unprecedented severe spikes, sudden surges, or abrupt turbulence absent from the baseline.\n"
-    "   - Ongoing sustained saturation where signals remain abnormally pegged at extreme levels (>= 0.50 or near 1.0) across both panels.\n\n"
+    "   - All signals remain quiet and steady within low baseline ranges (<= 0.25).\n"
+    "   - Harmless low-amplitude heartbeat pulses matching shapes present in Panel 1.\n"
+    "2. ANOMALY (anomaly_confidence: 2 or 3, anomaly_likelihood: 0.75 - 1.00):\n"
+    "   - Any channel surging above 0.40.\n"
+    "   - Coordinated multi-channel step shifts, spikes, or turbulence.\n"
+    "   - Sustained elevated signals (>= 0.40) continuing from Panel 1 into Panel 2.\n\n"
     "Respond ONLY with a valid JSON object:\n"
     "{\n"
-    "  \"temporal_continuity_analysis\": \"<1-2 sentences evaluating whether signals are in nominal operating range, recurring normal rhythm, or an active/ongoing anomaly breakdown>\",\n"
-    "  \"anomaly_confidence\": <1 (normal), 2 (ambiguous noise), or 3 (high confidence anomaly)>,\n"
+    "  \"temporal_continuity_analysis\": \"<1 sentence summary evaluating signal levels and shapes>\",\n"
+    "  \"anomaly_confidence\": <1 (normal) or 2/3 (anomaly)>,\n"
     "  \"anomaly_likelihood\": <float 0.00 to 1.00>,\n"
-    "  \"is_anomaly\": <true only if anomaly_confidence == 3, else false>,\n"
+    "  \"is_anomaly\": <true if anomaly_confidence >= 2, else false>,\n"
     "  \"anomalous_timesteps\": [<start_step>, <end_step>],\n"
     "  \"affected_dimensions\": [\"Dim X\", ...]\n"
     "}"
 )
 
 
-def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, base_std=None, save_path="temp_dual.png", ctx_len=800):
+def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, base_std=None, save_path=None, ctx_len=800):
     """Renders dual-horizon canvas where Panel 1 is strictly prior history and curves are uncluttered."""
     ctx_start = max(0, start_idx - ctx_len)
     # strictly prior history up to start_idx to prevent target window leakage into the reference panel
@@ -74,7 +72,9 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, ba
     plt.savefig(buf, format="png", dpi=90, bbox_inches="tight")
     buf.seek(0)
     img = Image.open(buf)
-    plt.close("all")
+    img.load()
+    buf.close()
+    plt.close(fig)
     if save_path:
         img.save(save_path)
         return save_path
@@ -154,16 +154,16 @@ def parse_vlm_json_output(output_text, window_size=200):
             "reason": reason
         }
 
-    # calibrate boolean flag with 3-level VLM4TS confidence scale
+    # calibrate boolean flag with confidence if provided
     if "anomaly_confidence" in parsed and parsed["anomaly_confidence"] is not None:
         try:
             c = int(parsed["anomaly_confidence"])
-            if c <= 2:
+            if c == 1:
                 parsed["is_anomaly"] = False
-                parsed["anomaly_likelihood"] = min(parsed.get("anomaly_likelihood", 0.0), 0.35)
-            elif c == 3:
+                parsed["anomaly_likelihood"] = min(parsed.get("anomaly_likelihood", 0.0), 0.15)
+            elif c >= 2:
                 parsed["is_anomaly"] = True
-                parsed["anomaly_likelihood"] = max(parsed.get("anomaly_likelihood", 0.85), 0.85)
+                parsed["anomaly_likelihood"] = max(parsed.get("anomaly_likelihood", 0.75), 0.75)
         except (ValueError, TypeError):
             pass
 
@@ -173,7 +173,7 @@ def parse_vlm_json_output(output_text, window_size=200):
     # reconcile boolean flag with likelihood
     if parsed["anomaly_likelihood"] >= 0.5:
         parsed["is_anomaly"] = True
-    elif parsed["anomaly_likelihood"] < 0.35:
+    elif parsed["anomaly_likelihood"] < 0.2:
         parsed["is_anomaly"] = False
         
     # sanitize timesteps to relative range [0, window_size]

@@ -108,12 +108,17 @@ def main():
             total_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
             print(f"[ACCELERATION] CUDA Active: Found {num_gpus} GPU(s). Primary: {gpu_name} ({total_vram:.2f} GB VRAM)")
             torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-            device_map = "auto"
+            device_map = {"": 0}
+            primary_device = "cuda:0"
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
         else:
             print("[ACCELERATION] ⚠️ WARNING: CUDA NOT DETECTED! Running on CPU.")
             print("[ACCELERATION] In Kaggle, enable GPU via Settings -> Accelerator -> GPU T4 x2 or P100.")
             torch_dtype = torch.float32
             device_map = "cpu"
+            primary_device = "cpu"
 
         print(f"Loading {cfg['teacher']['model_id']} with token budget capping and left-padding...")
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
@@ -172,7 +177,7 @@ def main():
                     f"{SYSTEM_PROMPT}\n\n"
                     f"CURRENT WINDOW TELEMETRY INFO:\n"
                     f"- Active Channels Plotted in Canvas: {channel_names}\n"
-                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If signals are within nominal low baseline ranges (<= 0.25) or repeat recurring rhythms from Panel 1, mark as normal (confidence 1). If isolated single-channel noise without multi-channel coordination, mark as ambiguous (confidence 2). Flag as anomaly (confidence 3) if Panel 2 exhibits an unprecedented surge OR if multiple channels remain abnormally saturated (>= 0.50) across both panels.\n"
+                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If all signals remain steady and quiet within low baseline ranges (<= 0.25) or repeat harmless heartbeat pulses, mark as normal (confidence 1). If any channel surges or is sustained above 0.40, or displays coordinated multi-channel step shifts or turbulence, mark as an anomaly (confidence 2 or 3).\n"
                     f"- Strictly report affected_dimensions ONLY from {channel_names}."
                 )
                 batch_messages.append([{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": grounded_prompt}]}])
@@ -180,18 +185,23 @@ def main():
             texts = [processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in batch_messages]
             image_inputs, video_inputs = process_vision_info(batch_messages)
             inputs = processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
-            if has_cuda:
-                inputs = inputs.to("cuda")
-            else:
-                inputs = inputs.to(model.device)
+            inputs = inputs.to(primary_device)
             
-            with torch.no_grad():
+            with torch.inference_mode():
+                # Step 1: Single forward pass to extract prompt embeddings z_T
+                prompt_outputs = model(**inputs, output_hidden_states=True)
+                prompt_hidden = prompt_outputs.hidden_states[-1]
+                mask = inputs.attention_mask.unsqueeze(-1).to(dtype=prompt_hidden.dtype)
+                z_T_batch = ((prompt_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)).float().cpu()
+                del prompt_outputs, prompt_hidden
+
+                # Step 2: Fast autoregressive text generation without retaining hidden states
                 gen_outputs = model.generate(
                     **inputs,
-                    max_new_tokens=160,
+                    max_new_tokens=90,
                     do_sample=False,
                     return_dict_in_generate=True,
-                    output_hidden_states=True
+                    output_hidden_states=False
                 )
                 
             prompt_len = inputs.input_ids.shape[1]
@@ -200,10 +210,7 @@ def main():
                 out_txt = processor.decode(out_ids, skip_special_tokens=True)
                 parsed = parse_vlm_json_output(out_txt, window_size=w_size)
                 
-                # pool prompt latent representation masking out left padding
-                hidden_b = gen_outputs.hidden_states[0][-1][i_b]
-                mask_b = inputs.attention_mask[i_b].unsqueeze(-1).to(dtype=hidden_b.dtype)
-                z_T = ((hidden_b * mask_b).sum(dim=0) / mask_b.sum(dim=0).clamp(min=1.0)).float().detach().cpu()
+                z_T = z_T_batch[i_b]
                 
                 teacher_cache[st] = {
                     "is_anomaly": parsed["is_anomaly"],
