@@ -223,5 +223,48 @@ def main():
 
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
 
+    # Automated Teacher Diagnostic Audit against Ground Truth
+    print("\n" + "=" * 70)
+    print("                 TEACHER ACCURACY & QUALITY AUDIT                 ")
+    print("=" * 70)
+    tp, fp, tn, fn = 0, 0, 0, 0
+    audit_windows = [st for st in curriculum_starts if st in teacher_cache]
+    for st in audit_windows:
+        v = teacher_cache[st]
+        gt_window = labels[st : st + w_size]
+        is_gt_anom = bool(np.any(gt_window >= 0.5))
+        pred_anom = bool(v.get("is_anomaly", False))
+        score = v.get("anomaly_likelihood", 0.0)
+        conf = v.get("anomaly_confidence", 1)
+        
+        if is_gt_anom and pred_anom:
+            tp += 1
+            tag = "TP [Hit]"
+        elif not is_gt_anom and not pred_anom:
+            tn += 1
+            tag = "TN [Clean]"
+        elif not is_gt_anom and pred_anom:
+            fp += 1
+            tag = "FP [False Alarm]"
+        else:
+            fn += 1
+            tag = "FN [Missed]"
+            
+        print(f"Window @ {st:05d} | GT: {'ANOM' if is_gt_anom else 'NORM':4s} | Pred: {'ANOM' if pred_anom else 'NORM':4s} (Score={score:.2f}, Conf={conf}) | {tag}")
+
+    total = tp + fp + tn + fn
+    acc = (tp + tn) / max(1, total)
+    prec = tp / max(1, tp + fp)
+    rec = tp / max(1, tp + fn)
+    f1 = 2 * prec * rec / max(1e-6, prec + rec)
+
+    print("-" * 70)
+    print(f"Summary: TP={tp}, FP={fp}, TN={tn}, FN={fn} | Total Windows: {total}")
+    print(f"Teacher Accuracy:  {acc:.1%}")
+    print(f"Teacher Precision: {prec:.1%}")
+    print(f"Teacher Recall:    {rec:.1%}")
+    print(f"Teacher F1-Score:  {f1:.3f}")
+    print("=" * 70 + "\n")
+
 if __name__ == "__main__":
     main()
