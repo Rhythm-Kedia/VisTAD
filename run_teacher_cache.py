@@ -189,7 +189,7 @@ def main():
                 grounded_prompt = (
                     f"CURRENT WINDOW TELEMETRY INFO:\n"
                     f"- Active Channels Plotted in Canvas: {channel_names}\n"
-                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If signals stay inside nominal baseline (inside ±3σ) OR repeat periodic heartbeat pulses already visible in Panel 1, mark as normal (confidence 1). Only mark as an anomaly (confidence 2 or 3) if any channel exhibits a NEW breach of ±3σ, step shift, or sustained turbulence absent from Panel 1.\n"
+                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. Mark as NORMAL (confidence 1) if signals stay inside nominal baseline (inside ±3σ) or exhibit brief recurring pulses/isolated blips matching Panel 1. Mark as ANOMALY (confidence 2 or 3) if any channel displays sustained elevation/plateau above ±3σ (including ongoing anomalies continuing from Panel 1) or coordinated multi-channel step shifts.\n"
                     f"- Strictly report affected_dimensions ONLY from {channel_names}."
                 )
                 batch_messages.append([
@@ -206,7 +206,7 @@ def main():
                 # Single pass: generate text while retaining prompt prefill hidden states for z_T extraction
                 gen_outputs = model.generate(
                     **inputs,
-                    max_new_tokens=70,
+                    max_new_tokens=90,
                     do_sample=False,
                     return_dict_in_generate=True,
                     output_hidden_states=True
