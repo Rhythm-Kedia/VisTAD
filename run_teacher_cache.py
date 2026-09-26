@@ -138,11 +138,13 @@ def main():
         from qwen_vl_utils import process_vision_info
         
         model_id = cfg["teacher"]["model_id"]
-        # token budget: min_pixels ensures sufficient detail, max_pixels covers full canvas resolution (~380k px)
+        # token budget: cap visual tokens to ~252 per image (down from 1,008) to slash GPU compute by ~4x
+        min_px = cfg["teacher"].get("min_pixels", 128 * 28 * 28)
+        max_px = cfg["teacher"].get("max_pixels", 256 * 28 * 28)
         processor = AutoProcessor.from_pretrained(
             model_id,
-            min_pixels=256 * 28 * 28,
-            max_pixels=1024 * 28 * 28
+            min_pixels=min_px,
+            max_pixels=max_px
         )
         processor.tokenizer.padding_side = "left"
         

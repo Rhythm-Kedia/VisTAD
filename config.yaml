@@ -46,4 +46,6 @@ teacher:
   cache_dir: "cache"
   macro_context_len: 800    # macro historical context steps
   decision_threshold: 0.63  # optimal calibrated logit boundary (0.63 -> 100% acc, zero FP/FN)
+  min_pixels: 100352        # 128 * 28 * 28: ~112-144 visual tokens minimum
+  max_pixels: 200704        # 256 * 28 * 28: caps visual tokens to ~252 (4x speedup over 1024)
 
