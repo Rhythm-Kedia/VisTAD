@@ -13,7 +13,7 @@ dataset:
 
 # 2. Channel Filtering (Top-K)
 channel_filter:
-  strategy: "top_k_zscore"  # "top_k_zscore" | "top_k_variance" | "none"
+  strategy: "median_shift"  # "median_shift" | "top_k_zscore" | "top_k_variance" | "none"
   k: 6                      # number of active channels to extract (if D > 6)
 
 # 3. Student Model Architecture

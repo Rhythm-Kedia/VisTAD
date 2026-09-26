@@ -16,17 +16,20 @@ SYSTEM_PROMPT = (
     "- PANEL 2 (BOTTOM): Candidate target window under inspection (relative steps 0 to 200).\n\n"
     "DIAGNOSTIC PRINCIPLES (Following VLM4TS Expert Guidelines):\n"
     "1. NORMAL BEHAVIOR (anomaly_confidence: 1, anomaly_likelihood: 0.00 - 0.15):\n"
+    "   - Healthy server telemetry operating within low nominal baseline ranges (typically <= 0.25).\n"
     "   - Recurring periodic pulses, duty cycles, or heartbeat spikes in Panel 2 that MATCH the rhythm, height, or shape already present throughout Panel 1.\n"
-    "   - Minor isolated noise or stationary fluctuations consistent with the historical baseline.\n"
-    "2. TRUE ANOMALY (anomaly_confidence: 2 or 3, anomaly_likelihood: 0.70 - 1.00):\n"
-    "   - Coordinated multi-sensor disruptions occurring simultaneously across multiple channels.\n"
-    "   - Unprecedented severe spikes, sudden level shifts, or abrupt turbulence in Panel 2 that NEVER occurred anywhere in Panel 1.\n\n"
+    "2. AMBIGUOUS / MODERATE NOISE (anomaly_confidence: 2, anomaly_likelihood: 0.20 - 0.35):\n"
+    "   - Minor isolated noise, stationary fluctuations, or sporadic single-channel variance without coordinated multi-channel breakdown (discarded as non-actionable).\n"
+    "3. TRUE ANOMALY (anomaly_confidence: 3, anomaly_likelihood: 0.85 - 1.00):\n"
+    "   - Coordinated multi-sensor breakdown occurring simultaneously across multiple channels.\n"
+    "   - Unprecedented severe spikes, sudden surges, or abrupt turbulence absent from the baseline.\n"
+    "   - Ongoing sustained saturation where signals remain abnormally pegged at extreme levels (>= 0.50 or near 1.0) across both panels.\n\n"
     "Respond ONLY with a valid JSON object:\n"
     "{\n"
-    "  \"temporal_continuity_analysis\": \"<1-2 sentences comparing Panel 2 to Panel 1: Does Panel 2 follow the established historical rhythm, or is it an unprecedented disruption?>\",\n"
-    "  \"anomaly_confidence\": <1 (normal/ambiguous), 2 (moderate anomaly), or 3 (high confidence anomaly)>,\n"
+    "  \"temporal_continuity_analysis\": \"<1-2 sentences evaluating whether signals are in nominal operating range, recurring normal rhythm, or an active/ongoing anomaly breakdown>\",\n"
+    "  \"anomaly_confidence\": <1 (normal), 2 (ambiguous noise), or 3 (high confidence anomaly)>,\n"
     "  \"anomaly_likelihood\": <float 0.00 to 1.00>,\n"
-    "  \"is_anomaly\": <true only if anomaly_confidence >= 2, else false>,\n"
+    "  \"is_anomaly\": <true only if anomaly_confidence == 3, else false>,\n"
     "  \"anomalous_timesteps\": [<start_step>, <end_step>],\n"
     "  \"affected_dimensions\": [\"Dim X\", ...]\n"
     "}"
@@ -151,16 +154,16 @@ def parse_vlm_json_output(output_text, window_size=200):
             "reason": reason
         }
 
-    # calibrate boolean flag with confidence if provided
+    # calibrate boolean flag with 3-level VLM4TS confidence scale
     if "anomaly_confidence" in parsed and parsed["anomaly_confidence"] is not None:
         try:
             c = int(parsed["anomaly_confidence"])
-            if c == 1:
+            if c <= 2:
                 parsed["is_anomaly"] = False
-                parsed["anomaly_likelihood"] = min(parsed.get("anomaly_likelihood", 0.0), 0.15)
-            elif c >= 2:
+                parsed["anomaly_likelihood"] = min(parsed.get("anomaly_likelihood", 0.0), 0.35)
+            elif c == 3:
                 parsed["is_anomaly"] = True
-                parsed["anomaly_likelihood"] = max(parsed.get("anomaly_likelihood", 0.70), 0.70)
+                parsed["anomaly_likelihood"] = max(parsed.get("anomaly_likelihood", 0.85), 0.85)
         except (ValueError, TypeError):
             pass
 
@@ -170,7 +173,7 @@ def parse_vlm_json_output(output_text, window_size=200):
     # reconcile boolean flag with likelihood
     if parsed["anomaly_likelihood"] >= 0.5:
         parsed["is_anomaly"] = True
-    elif parsed["anomaly_likelihood"] < 0.2:
+    elif parsed["anomaly_likelihood"] < 0.35:
         parsed["is_anomaly"] = False
         
     # sanitize timesteps to relative range [0, window_size]

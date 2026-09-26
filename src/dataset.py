@@ -5,14 +5,30 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 
-def select_top_k_channels(window_data, base_mean, base_std, strategy="top_k_zscore", k=6):
-    """Filters channels to Top-K to avoid visual spaghetti / dimensional bloat."""
+def select_top_k_channels(window_data, base_mean=None, base_std=None, ctx_data=None, strategy="median_shift", k=6):
+    """Filters channels to Top-K avoiding visual clutter and dead-channel division explosions."""
     num_channels = window_data.shape[1]
     if strategy == "none" or num_channels <= k:
         return list(range(num_channels))
     
-    if strategy == "top_k_zscore":
-        z_scores = np.abs((window_data - base_mean) / base_std)
+    # 1. Primary Strategy: Robust Median-Shift (No zero-division, 50% breakdown point)
+    if strategy == "median_shift":
+        if ctx_data is not None and len(ctx_data) >= 10:
+            reference = np.median(ctx_data, axis=0)
+        elif base_mean is not None:
+            reference = base_mean
+        else:
+            reference = np.median(window_data, axis=0)
+            
+        deltas = np.max(np.abs(window_data - reference), axis=0)
+        top_k_idx = np.argsort(deltas)[::-1][:k]
+        return sorted(list(top_k_idx))
+
+    # 2. Legacy fallback: Top-K Z-Score with robust standard deviation floor
+    elif strategy == "top_k_zscore":
+        denom = (base_std if base_std is not None else np.std(window_data, axis=0)) + 0.05
+        ref = base_mean if base_mean is not None else np.mean(window_data, axis=0)
+        z_scores = np.abs((window_data - ref) / denom)
         max_z = np.max(z_scores, axis=0)
         top_k_idx = np.argsort(max_z)[::-1][:k]
         return sorted(list(top_k_idx))
@@ -57,7 +73,10 @@ class TimeSeriesDataset(Dataset):
         window_y = self.labels[start:end]
         
         if self.filter_strategy != "none":
+            ctx_start = max(0, start - 800)
+            ctx_data = self.data[ctx_start:start] if start > 0 else None
             active_dims = select_top_k_channels(window_x, self.base_mean, self.base_std, 
+                                                ctx_data=ctx_data,
                                                 strategy=self.filter_strategy, k=self.k)
             window_x = window_x[:, active_dims]
             

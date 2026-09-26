@@ -150,17 +150,19 @@ def main():
                 end = st + w_size
                 window_slice = raw_data[st:end]
                 
-                # compute local macro-context baseline for steady operational reference
                 ctx_start = max(0, st - ctx_len)
                 ctx_slice = raw_data[ctx_start:st]
-                if len(ctx_slice) >= 100:
-                    cur_base_m = np.mean(ctx_slice, axis=0)
-                    cur_base_s = np.std(ctx_slice, axis=0) + 1e-6
-                else:
-                    cur_base_m = base_m
-                    cur_base_s = base_s
-                    
-                top_dims = select_top_k_channels(window_slice, cur_base_m, cur_base_s, strategy="top_k_zscore", k=6)
+                
+                filter_strategy = cfg["channel_filter"].get("strategy", "median_shift")
+                k_channels = cfg["channel_filter"].get("k", 6)
+                top_dims = select_top_k_channels(
+                    window_slice, 
+                    base_mean=base_m, 
+                    base_std=base_s, 
+                    ctx_data=ctx_slice, 
+                    strategy=filter_strategy, 
+                    k=k_channels
+                )
                 channel_names = [f"Dim {d}" for d in top_dims]
                 
                 # in-memory rendering: returns a PIL Image directly without disk I/O
@@ -170,7 +172,7 @@ def main():
                     f"{SYSTEM_PROMPT}\n\n"
                     f"CURRENT WINDOW TELEMETRY INFO:\n"
                     f"- Active Channels Plotted in Canvas: {channel_names}\n"
-                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If pulses, sawtooth rhythms, or baseline spikes recur in Panel 1, they are normal operational telemetry (confidence: 1, likelihood <= 0.15). Only flag an anomaly if Panel 2 exhibits an unprecedented disruption or coordinated multi-channel breakdown absent in Panel 1.\n"
+                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If signals are within nominal low baseline ranges (<= 0.25) or repeat recurring rhythms from Panel 1, mark as normal (confidence 1). If isolated single-channel noise without multi-channel coordination, mark as ambiguous (confidence 2). Flag as anomaly (confidence 3) if Panel 2 exhibits an unprecedented surge OR if multiple channels remain abnormally saturated (>= 0.50) across both panels.\n"
                     f"- Strictly report affected_dimensions ONLY from {channel_names}."
                 )
                 batch_messages.append([{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": grounded_prompt}]}])
