@@ -125,11 +125,11 @@ def main():
         from qwen_vl_utils import process_vision_info
         
         model_id = cfg["teacher"]["model_id"]
-        # token budget cap: limits visual tokens from ~810 to ~360, accelerating prefill by >50%
+        # token budget: min_pixels ensures sufficient detail, max_pixels covers full canvas resolution (~380k px)
         processor = AutoProcessor.from_pretrained(
             model_id,
             min_pixels=256 * 28 * 28,
-            max_pixels=512 * 28 * 28
+            max_pixels=1024 * 28 * 28
         )
         processor.tokenizer.padding_side = "left"
         
@@ -170,17 +170,23 @@ def main():
                 )
                 channel_names = [f"Dim {d}" for d in top_dims]
                 
-                # in-memory rendering: returns a PIL Image directly without disk I/O
-                img = render_dual_horizon_image(raw_data, st, end, top_dims, ctx_len=ctx_len)
+                # in-memory rendering: returns a PIL Image directly without disk I/O, z-normalized
+                img = render_dual_horizon_image(
+                    raw_data, st, end, top_dims,
+                    base_mean=base_m, base_std=base_s,
+                    ctx_len=ctx_len
+                )
                 
                 grounded_prompt = (
-                    f"{SYSTEM_PROMPT}\n\n"
                     f"CURRENT WINDOW TELEMETRY INFO:\n"
                     f"- Active Channels Plotted in Canvas: {channel_names}\n"
-                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If all signals remain steady and quiet within low baseline ranges (<= 0.25) or repeat harmless heartbeat pulses, mark as normal (confidence 1). If any channel surges or is sustained above 0.40, or displays coordinated multi-channel step shifts or turbulence, mark as an anomaly (confidence 2 or 3).\n"
+                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If all signals remain steady within normal baseline (comfortably inside the red dashed ±3σ lines) or repeat harmless heartbeat pulses, mark as normal (confidence 1). If any channel breaches the ±3σ lines or displays sustained offsets/turbulence, mark as an anomaly (confidence 2 or 3).\n"
                     f"- Strictly report affected_dimensions ONLY from {channel_names}."
                 )
-                batch_messages.append([{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": grounded_prompt}]}])
+                batch_messages.append([
+                    {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+                    {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": grounded_prompt}]}
+                ])
 
             texts = [processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in batch_messages]
             image_inputs, video_inputs = process_vision_info(batch_messages)
@@ -188,21 +194,18 @@ def main():
             inputs = inputs.to(primary_device)
             
             with torch.inference_mode():
-                # Step 1: Single forward pass to extract prompt embeddings z_T
-                prompt_outputs = model(**inputs, output_hidden_states=True)
-                prompt_hidden = prompt_outputs.hidden_states[-1]
-                mask = inputs.attention_mask.unsqueeze(-1).to(dtype=prompt_hidden.dtype)
-                z_T_batch = ((prompt_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)).float().cpu()
-                del prompt_outputs, prompt_hidden
-
-                # Step 2: Fast autoregressive text generation without retaining hidden states
+                # Single pass: generate text while retaining prompt prefill hidden states for z_T extraction
                 gen_outputs = model.generate(
                     **inputs,
-                    max_new_tokens=90,
+                    max_new_tokens=80,
                     do_sample=False,
                     return_dict_in_generate=True,
-                    output_hidden_states=False
+                    output_hidden_states=True
                 )
+                # gen_outputs.hidden_states[0] corresponds to prompt prefill pass; [-1] is the last layer
+                prompt_hidden = gen_outputs.hidden_states[0][-1]
+                mask = inputs.attention_mask.unsqueeze(-1).to(dtype=prompt_hidden.dtype)
+                z_T_batch = ((prompt_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)).float().cpu()
                 
             prompt_len = inputs.input_ids.shape[1]
             for i_b, st in enumerate(batch_starts):

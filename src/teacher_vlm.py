@@ -10,21 +10,21 @@ from PIL import Image
 import torch
 
 SYSTEM_PROMPT = (
-    "You are an expert time-series analyst performing precision anomaly detection on server metrics.\n"
-    "You are provided a 2-panel line plot:\n"
-    "- PANEL 1 (TOP): Prior historical context over past 800 steps.\n"
+    "You are an expert server telemetry and SRE analyst performing precision anomaly detection.\n"
+    "You are inspecting a 2-panel line plot of z-normalized metric channels (0 = nominal baseline mean, ±1 = 1 std dev, red dashed lines = ±3 std dev threshold):\n"
+    "- PANEL 1 (TOP): Prior historical context over past 800 steps (baseline reference).\n"
     "- PANEL 2 (BOTTOM): Candidate target window under inspection (relative steps 0 to 200).\n\n"
     "DIAGNOSTIC PRINCIPLES:\n"
     "1. NORMAL BEHAVIOR (anomaly_confidence: 1, anomaly_likelihood: 0.00 - 0.15):\n"
-    "   - All signals remain quiet and steady within low baseline ranges (<= 0.25).\n"
-    "   - Harmless low-amplitude heartbeat pulses matching shapes present in Panel 1.\n"
+    "   - All signals fluctuate within nominal range (comfortably inside the red dashed ±3σ lines).\n"
+    "   - Regular, harmless heartbeat pulses or noise matching shapes present in Panel 1.\n"
     "2. ANOMALY (anomaly_confidence: 2 or 3, anomaly_likelihood: 0.75 - 1.00):\n"
-    "   - Any channel surging above 0.40.\n"
-    "   - Coordinated multi-channel step shifts, spikes, or turbulence.\n"
-    "   - Sustained elevated signals (>= 0.40) continuing from Panel 1 into Panel 2.\n\n"
-    "Respond ONLY with a valid JSON object:\n"
+    "   - Any channel breaching the red dashed ±3σ threshold line (surging above +3σ or dropping below -3σ).\n"
+    "   - Coordinated multi-channel step shifts, sustained level offsets, or high-frequency turbulence not seen in Panel 1.\n"
+    "   - Sustained elevation or drop continuing across the window.\n\n"
+    "Respond ONLY with a valid JSON object with NO extra text or markdown:\n"
     "{\n"
-    "  \"temporal_continuity_analysis\": \"<1 sentence summary evaluating signal levels and shapes>\",\n"
+    "  \"temporal_continuity_analysis\": \"<1 concise sentence evaluating signal levels relative to Panel 1>\",\n"
     "  \"anomaly_confidence\": <1 (normal) or 2/3 (anomaly)>,\n"
     "  \"anomaly_likelihood\": <float 0.00 to 1.00>,\n"
     "  \"is_anomaly\": <true if anomaly_confidence >= 2, else false>,\n"
@@ -42,22 +42,37 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, ba
     local_data = data[start_idx:end_idx]
     w_len = len(local_data)
     
+    # z-normalize per-channel using baseline statistics to highlight anomalies
+    if base_mean is not None:
+        mu = base_mean[dims]
+    else:
+        mu = np.mean(ctx_data[:, dims], axis=0)
+
+    if base_std is not None:
+        sigma = base_std[dims]
+    else:
+        sigma = np.std(ctx_data[:, dims], axis=0)
+
+    sigma = np.where(sigma < 1e-4, 1.0, sigma)
+    ctx_plot = (ctx_data[:, dims] - mu) / sigma
+    local_plot = (local_data[:, dims] - mu) / sigma
+
     fig, (ax_macro, ax_micro) = plt.subplots(2, 1, figsize=(9.0, 5.2), dpi=100, gridspec_kw={"height_ratios": [1, 1.3]})
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(dims), 1)))
     
     # top panel: strictly prior historical context (reference baseline)
     for i, d in enumerate(dims):
-        ax_macro.plot(range(len(ctx_data)), ctx_data[:, d], label=f"Dim {d}", color=colors[i], linewidth=0.9, alpha=0.85)
+        ax_macro.plot(range(len(ctx_data)), ctx_plot[:, i], label=f"Dim {d}", color=colors[i], linewidth=0.9, alpha=0.85)
     ax_macro.set_xlim(0, max(1, len(ctx_data)))
     ax_macro.set_title("PANEL 1: PRIOR HISTORICAL CONTEXT (Past 800 Steps BEFORE Target Window - Baseline)", fontsize=9, fontweight="bold", color="navy")
     ax_macro.grid(True, linestyle=":", alpha=0.5)
-    ax_macro.set_ylabel("Signal", fontsize=8)
+    ax_macro.set_ylabel("Z-Score (std dev)", fontsize=8)
     ax_macro.set_xlabel("Historical Time Steps Prior to Target Window", fontsize=8)
     ax_macro.legend(loc="upper right", ncol=min(6, len(dims)), fontsize=7)
     
     # bottom panel: candidate target window under inspection
     for i, d in enumerate(dims):
-        ax_micro.plot(range(w_len), local_data[:, d], label=f"Dim {d}", color=colors[i], linewidth=1.3)
+        ax_micro.plot(range(w_len), local_plot[:, i], label=f"Dim {d}", color=colors[i], linewidth=1.3)
     ax_micro.set_xlim(0, w_len)
     ax_micro.xaxis.set_major_locator(MultipleLocator(50))
     ax_micro.xaxis.set_minor_locator(MultipleLocator(10))
@@ -65,7 +80,15 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, ba
     ax_micro.grid(True, which="minor", linestyle=":", alpha=0.3)
     ax_micro.set_title(f"PANEL 2: CANDIDATE TARGET WINDOW UNDER INSPECTION (Steps 0 to {w_len})", fontsize=9, fontweight="bold", color="darkgreen")
     ax_micro.set_xlabel(f"Relative Step Index within Target Window (0 - {w_len})", fontsize=8)
-    ax_micro.set_ylabel("Signal", fontsize=8)
+    ax_micro.set_ylabel("Z-Score (std dev)", fontsize=8)
+
+    # visual anomaly threshold anchors (0 mean and ±3 sigma lines)
+    for ax in (ax_macro, ax_micro):
+        ax.axhline(0.0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
+        ax.axhline(3.0, color="crimson", linestyle="--", linewidth=0.8, alpha=0.6)
+        ax.axhline(-3.0, color="crimson", linestyle="--", linewidth=0.8, alpha=0.6)
+        y_min, y_max = ax.get_ylim()
+        ax.set_ylim(min(y_min, -4.0), max(y_max, 4.0))
     
     plt.tight_layout()
     buf = io.BytesIO()
