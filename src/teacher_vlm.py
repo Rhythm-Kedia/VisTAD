@@ -17,10 +17,10 @@ SYSTEM_PROMPT = (
     "DIAGNOSTIC PRINCIPLES:\n"
     "1. NORMAL BEHAVIOR (anomaly_confidence: 1, anomaly_likelihood: 0.00 - 0.15):\n"
     "   - All signals fluctuate within nominal range (comfortably inside the red dashed ±3σ lines).\n"
-    "   - Regular, harmless heartbeat pulses or noise matching shapes present in Panel 1.\n"
+    "   - Periodic pulses or spikes that ALSO appear regularly in Panel 1 (benign background operations/heartbeats).\n"
     "2. ANOMALY (anomaly_confidence: 2 or 3, anomaly_likelihood: 0.75 - 1.00):\n"
-    "   - Any channel breaching the red dashed ±3σ threshold line (surging above +3σ or dropping below -3σ).\n"
-    "   - Coordinated multi-channel step shifts, sustained level offsets, or high-frequency turbulence not seen in Panel 1.\n"
+    "   - Any channel breaching the red dashed ±3σ lines with a NEW spike, plateau, or offset NOT present in Panel 1.\n"
+    "   - Coordinated multi-channel step shifts, persistent baseline offsets, or turbulence that disrupts the historical pattern.\n"
     "   - Sustained elevation or drop continuing across the window.\n\n"
     "Respond ONLY with a valid JSON object with NO extra text or markdown:\n"
     "{\n"
@@ -231,8 +231,11 @@ def parse_vlm_json_output(output_text, window_size=200):
 
     # construct dense temporal guidance mask
     dense_mask = np.zeros(window_size, dtype=np.float32)
-    if parsed["is_anomaly"] and len(valid_ts) == 2:
-        dense_mask[valid_ts[0]:valid_ts[1]] = parsed["anomaly_likelihood"]
+    if parsed["is_anomaly"]:
+        if len(valid_ts) == 2:
+            dense_mask[valid_ts[0]:valid_ts[1]] = parsed["anomaly_likelihood"]
+        else:
+            dense_mask[int(window_size * 0.1):int(window_size * 0.9)] = parsed["anomaly_likelihood"]
     parsed["teacher_dense_mask"] = torch.tensor(dense_mask, dtype=torch.float32)
 
     return parsed
