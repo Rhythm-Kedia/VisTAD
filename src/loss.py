@@ -46,7 +46,7 @@ class MultiObjectiveKDLoss(nn.Module):
             
         if self.w_feat > 0.0 and t_mask.any():
             student_feat = student_outputs["features"][t_mask]
-            teacher_feat = batch["z_teacher"].to(device)[t_mask]
+            teacher_feat = batch["z_teacher"].to(device=device, dtype=student_feat.dtype)[t_mask]
             l_feat = self.mse_loss(student_feat, teacher_feat)
             losses["loss_feat"] = l_feat.item()
             total_loss += self.w_feat * l_feat
@@ -56,7 +56,7 @@ class MultiObjectiveKDLoss(nn.Module):
         # 3. Soft Teacher Response Distillation (L_resp)
         if self.w_resp > 0.0 and t_mask.any():
             pred_scores = student_outputs["score_scalar"][t_mask]
-            teacher_scores = batch["a_teacher"].to(device)[t_mask]
+            teacher_scores = batch["a_teacher"].to(device=device, dtype=pred_scores.dtype)[t_mask]
             eps = 1e-7
             p_s = torch.clamp(pred_scores, eps, 1.0 - eps)
             p_t = torch.clamp(teacher_scores, eps, 1.0 - eps)

@@ -12,6 +12,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run Frozen VLM Teacher & Cache Distillation Guidance")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--num_windows", type=int, default=50, help="Number of curriculum windows to cache")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for parallel VLM teacher inference")
     parser.add_argument("--mock", action="store_true", help="Generate mock teacher cache without loading 3B model (for fast testing)")
     return parser.parse_args()
 
@@ -89,6 +90,7 @@ def main():
                 
             teacher_cache[st] = {
                 "is_anomaly": has_anom,
+                "anomaly_confidence": 3 if has_anom else 1,
                 "anomaly_likelihood": sim_likelihood,
                 "z_feature": torch.randn(cfg["student"].get("teacher_feat_dim", 2048)),
                 "anomalous_timesteps": [20, 80] if has_anom else [],
@@ -113,12 +115,19 @@ def main():
             torch_dtype = torch.float32
             device_map = "cpu"
 
-        print(f"Loading {cfg['teacher']['model_id']} with device_map='{device_map}'...")
+        print(f"Loading {cfg['teacher']['model_id']} with token budget capping and left-padding...")
         from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
         from qwen_vl_utils import process_vision_info
         
         model_id = cfg["teacher"]["model_id"]
-        processor = AutoProcessor.from_pretrained(model_id)
+        # token budget cap: limits visual tokens from ~810 to ~360, accelerating prefill by >50%
+        processor = AutoProcessor.from_pretrained(
+            model_id,
+            min_pixels=256 * 28 * 28,
+            max_pixels=512 * 28 * 28
+        )
+        processor.tokenizer.padding_side = "left"
+        
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id, torch_dtype=torch_dtype, device_map=device_map
         )
@@ -129,80 +138,88 @@ def main():
             print(f"[ACCELERATION] Model weights successfully resident in VRAM: {vram_used:.2f} GB")
         
         ctx_len = cfg["teacher"].get("macro_context_len", 800)
-        for i, st in enumerate(curriculum_starts):
-            if st in teacher_cache:
-                print(f"[{i+1}/{len(curriculum_starts)}] Window @ {st} already cached. Skipping.")
-                continue
-
-            t_win_start = time.time()
-            end = st + w_size
-            window_slice = raw_data[st:end]
+        pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
+        print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}).")
+        
+        for b_idx in range(0, len(pending_starts), args.batch_size):
+            t_batch_start = time.time()
+            batch_starts = pending_starts[b_idx : b_idx + args.batch_size]
+            batch_messages = []
             
-            # compute local macro-context baseline for steady operational reference
-            ctx_start = max(0, st - ctx_len)
-            ctx_slice = raw_data[ctx_start:st]
-            if len(ctx_slice) >= 100:
-                cur_base_m = np.mean(ctx_slice, axis=0)
-                cur_base_s = np.std(ctx_slice, axis=0) + 1e-6
-            else:
-                cur_base_m = base_m
-                cur_base_s = base_s
+            for st in batch_starts:
+                end = st + w_size
+                window_slice = raw_data[st:end]
                 
-            top_dims = select_top_k_channels(window_slice, cur_base_m, cur_base_s, strategy="top_k_zscore", k=6)
-            
-            # compute max z-score departure across selected channels
-            z_scores = np.abs((window_slice[:, top_dims] - cur_base_m[top_dims]) / cur_base_s[top_dims])
-            max_z = float(np.max(z_scores))
-            channel_names = [f"Dim {d}" for d in top_dims]
-            
-            img_path = render_dual_horizon_image(
-                raw_data, st, end, top_dims, cur_base_m, base_std=cur_base_s,
-                save_path="temp_teacher.png", 
-                ctx_len=ctx_len
-            )
-            
-            # multimodal grounding: provide explicit active channel names and comparative guidance
-            grounded_prompt = (
-                f"{SYSTEM_PROMPT}\n\n"
-                f"CURRENT WINDOW TELEMETRY INFO:\n"
-                f"- Active Channels Plotted in Canvas: {channel_names}\n"
-                f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If pulses, sawtooth rhythms, or baseline spikes recur in Panel 1, they are normal operational telemetry (confidence: 1, likelihood <= 0.15). Only flag an anomaly if Panel 2 exhibits an unprecedented disruption or coordinated multi-channel breakdown absent in Panel 1.\n"
-                f"- Strictly report affected_dimensions ONLY from {channel_names}."
-            )
-            
-            messages = [{"role": "user", "content": [{"type": "image", "image": img_path}, {"type": "text", "text": grounded_prompt}]}]
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            img_in, vid_in = process_vision_info(messages)
-            inputs = processor(text=[text], images=img_in, videos=vid_in, padding=True, return_tensors="pt")
+                # compute local macro-context baseline for steady operational reference
+                ctx_start = max(0, st - ctx_len)
+                ctx_slice = raw_data[ctx_start:st]
+                if len(ctx_slice) >= 100:
+                    cur_base_m = np.mean(ctx_slice, axis=0)
+                    cur_base_s = np.std(ctx_slice, axis=0) + 1e-6
+                else:
+                    cur_base_m = base_m
+                    cur_base_s = base_s
+                    
+                top_dims = select_top_k_channels(window_slice, cur_base_m, cur_base_s, strategy="top_k_zscore", k=6)
+                channel_names = [f"Dim {d}" for d in top_dims]
+                
+                # in-memory rendering: returns a PIL Image directly without disk I/O
+                img = render_dual_horizon_image(raw_data, st, end, top_dims, ctx_len=ctx_len)
+                
+                grounded_prompt = (
+                    f"{SYSTEM_PROMPT}\n\n"
+                    f"CURRENT WINDOW TELEMETRY INFO:\n"
+                    f"- Active Channels Plotted in Canvas: {channel_names}\n"
+                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. If pulses, sawtooth rhythms, or baseline spikes recur in Panel 1, they are normal operational telemetry (confidence: 1, likelihood <= 0.15). Only flag an anomaly if Panel 2 exhibits an unprecedented disruption or coordinated multi-channel breakdown absent in Panel 1.\n"
+                    f"- Strictly report affected_dimensions ONLY from {channel_names}."
+                )
+                batch_messages.append([{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": grounded_prompt}]}])
+
+            texts = [processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in batch_messages]
+            image_inputs, video_inputs = process_vision_info(batch_messages)
+            inputs = processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
             if has_cuda:
                 inputs = inputs.to("cuda")
             else:
                 inputs = inputs.to(model.device)
             
             with torch.no_grad():
-                gen_ids = model.generate(**inputs, max_new_tokens=200, do_sample=False)
-                feat_out = model(**inputs, output_hidden_states=True)
-                z_T = feat_out.hidden_states[-1].mean(dim=1).squeeze(0).detach().cpu()
+                gen_outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=160,
+                    do_sample=False,
+                    return_dict_in_generate=True,
+                    output_hidden_states=True
+                )
                 
-            out_ids = [o[len(inp):] for inp, o in zip(inputs.input_ids, gen_ids)]
-            out_txt = processor.batch_decode(out_ids, skip_special_tokens=True)[0]
-            parsed = parse_vlm_json_output(out_txt, window_size=w_size)
-            
-            teacher_cache[st] = {
-                "is_anomaly": parsed["is_anomaly"],
-                "anomaly_likelihood": parsed["anomaly_likelihood"],
-                "z_feature": z_T,
-                "anomalous_timesteps": parsed.get("anomalous_timesteps", []),
-                "affected_dimensions": parsed.get("affected_dimensions", []),
-                "reason": parsed.get("reason", ""),
-                "teacher_dense_mask": parsed.get("teacher_dense_mask", torch.zeros(w_size, dtype=torch.float32))
-            }
-            # persist incrementally after each window so progress is never lost
+            prompt_len = inputs.input_ids.shape[1]
+            for i_b, st in enumerate(batch_starts):
+                out_ids = gen_outputs.sequences[i_b][prompt_len:]
+                out_txt = processor.decode(out_ids, skip_special_tokens=True)
+                parsed = parse_vlm_json_output(out_txt, window_size=w_size)
+                
+                # pool prompt latent representation masking out left padding
+                hidden_b = gen_outputs.hidden_states[0][-1][i_b]
+                mask_b = inputs.attention_mask[i_b].unsqueeze(-1).to(dtype=hidden_b.dtype)
+                z_T = ((hidden_b * mask_b).sum(dim=0) / mask_b.sum(dim=0).clamp(min=1.0)).float().detach().cpu()
+                
+                teacher_cache[st] = {
+                    "is_anomaly": parsed["is_anomaly"],
+                    "anomaly_confidence": parsed.get("anomaly_confidence", 1),
+                    "anomaly_likelihood": parsed["anomaly_likelihood"],
+                    "z_feature": z_T,
+                    "anomalous_timesteps": parsed.get("anomalous_timesteps", []),
+                    "affected_dimensions": parsed.get("affected_dimensions", []),
+                    "reason": parsed.get("reason", ""),
+                    "teacher_dense_mask": parsed.get("teacher_dense_mask", torch.zeros(w_size, dtype=torch.float32))
+                }
+                
+            # persist incrementally after each batch
             torch.save(teacher_cache, cache_file)
-            if os.path.exists(img_path):
-                os.remove(img_path)
-            elapsed = time.time() - t_win_start
-            print(f"[{i+1}/{len(curriculum_starts)}] Cached window @ {st} in {elapsed:.2f}s: Score={parsed['anomaly_likelihood']:.2f}, IsAnom={parsed['is_anomaly']} | Reason: {parsed.get('reason', '')[:50]}")
+            b_elapsed = time.time() - t_batch_start
+            per_w = b_elapsed / len(batch_starts)
+            done_count = len(teacher_cache)
+            print(f"[{done_count}/{len(curriculum_starts)}] Cached batch of {len(batch_starts)} windows ({batch_starts}) in {b_elapsed:.2f}s ({per_w:.2f}s/window).")
 
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
 

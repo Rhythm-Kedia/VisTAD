@@ -1,10 +1,12 @@
 import os
+import io
 import json
 import re
 import time
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
+from PIL import Image
 import torch
 
 SYSTEM_PROMPT = (
@@ -65,9 +67,15 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, ba
     ax_micro.set_ylabel("Signal", fontsize=8)
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=100, bbox_inches="tight")
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=90, bbox_inches="tight")
+    buf.seek(0)
+    img = Image.open(buf)
     plt.close("all")
-    return save_path
+    if save_path:
+        img.save(save_path)
+        return save_path
+    return img
 
 
 def parse_vlm_json_output(output_text, window_size=200):
@@ -168,15 +176,22 @@ def parse_vlm_json_output(output_text, window_size=200):
     # sanitize timesteps to relative range [0, window_size]
     timesteps = parsed.get("anomalous_timesteps", [])
     valid_ts = []
-    if parsed["is_anomaly"] and isinstance(timesteps, list) and len(timesteps) >= 2:
-        t0 = int(np.clip(min(timesteps), 0, window_size))
-        t1 = int(np.clip(max(timesteps), 0, window_size))
-        if t0 < t1:
-            valid_ts = [t0, t1]
-        elif t1 < t0:
-            valid_ts = [t1, t0]
-        else:
-            valid_ts = [max(0, t0 - 10), min(window_size, t0 + 10)]
+    if parsed["is_anomaly"] and isinstance(timesteps, list):
+        if len(timesteps) >= 2:
+            t0 = int(np.clip(min(timesteps), 0, window_size))
+            t1 = int(np.clip(max(timesteps), 0, window_size))
+            if t0 < t1:
+                valid_ts = [t0, t1]
+            elif t1 < t0:
+                valid_ts = [t1, t0]
+            else:
+                valid_ts = [max(0, t0 - 10), min(window_size, t0 + 10)]
+        elif len(timesteps) == 1:
+            try:
+                t0 = int(np.clip(int(float(timesteps[0])), 0, window_size))
+                valid_ts = [max(0, t0 - 10), min(window_size, t0 + 10)]
+            except (ValueError, TypeError):
+                pass
     parsed["anomalous_timesteps"] = valid_ts
     
     if not parsed["is_anomaly"]:
