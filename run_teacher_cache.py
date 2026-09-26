@@ -6,7 +6,10 @@ import numpy as np
 import torch
 
 from src.dataset import load_dataset_arrays, select_top_k_channels
-from src.teacher_vlm import render_dual_horizon_image, parse_vlm_json_output, SYSTEM_PROMPT
+from src.teacher_vlm import (
+    render_dual_horizon_image, parse_vlm_json_output, SYSTEM_PROMPT,
+    extract_telemetry_metrics, extract_logit_scores_and_features
+)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Frozen VLM Teacher & Cache Distillation Guidance")
@@ -159,6 +162,8 @@ def main():
             t_batch_start = time.time()
             batch_starts = pending_starts[b_idx : b_idx + args.batch_size]
             batch_messages = []
+            batch_windows = []
+            batch_top_dims = []
             
             for st in batch_starts:
                 end = st + w_size
@@ -178,6 +183,12 @@ def main():
                     k=k_channels
                 )
                 channel_names = [f"Dim {d}" for d in top_dims]
+                batch_windows.append(window_slice)
+                batch_top_dims.append(top_dims)
+                
+                peak_z, sustained_steps, mean_z = extract_telemetry_metrics(
+                    window_slice, base_m, base_s, top_dims
+                )
                 
                 # in-memory rendering: returns a PIL Image directly without disk I/O, z-normalized
                 img = render_dual_horizon_image(
@@ -187,10 +198,16 @@ def main():
                 )
                 
                 grounded_prompt = (
-                    f"CURRENT WINDOW TELEMETRY INFO:\n"
-                    f"- Active Channels Plotted in Canvas: {channel_names}\n"
-                    f"- Evaluator Guidance: Compare Panel 2 to Panel 1. Mark as NORMAL (confidence 1) if signals stay inside nominal baseline (inside ±3σ) or exhibit brief recurring pulses/isolated blips matching Panel 1. Mark as ANOMALY (confidence 2 or 3) if any channel displays sustained elevation/plateau above ±3σ (including ongoing anomalies continuing from Panel 1) or coordinated multi-channel step shifts.\n"
-                    f"- Strictly report affected_dimensions ONLY from {channel_names}."
+                    f"ACTIVE CHANNELS TELEMETRY:\n"
+                    f"- Active Channels: {channel_names}\n"
+                    f"- Peak absolute z-score: {peak_z:.1f}σ\n"
+                    f"- Max consecutive steps beyond ±3σ: {sustained_steps} steps\n"
+                    f"- Active channels mean deviation: {mean_z:.2f}σ\n\n"
+                    f"TASK:\n"
+                    f"Compare Panel 2 to Panel 1. Does Panel 2 display a genuine operational anomaly (a sustained plateau of 15+ steps or coordinated breakdown) breaking from the baseline in Panel 1?\n"
+                    f"Brief isolated pulses or routine background noise matching Panel 1 are NORMAL.\n"
+                    f"Answer strictly with YES or NO.\n"
+                    f"Answer:"
                 )
                 batch_messages.append([
                     {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
@@ -203,37 +220,18 @@ def main():
             inputs = inputs.to(primary_device)
             
             with torch.inference_mode():
-                # Single pass: generate text while retaining prompt prefill hidden states for z_T extraction
-                gen_outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=90,
-                    do_sample=False,
-                    return_dict_in_generate=True,
-                    output_hidden_states=True
-                )
-                # gen_outputs.hidden_states[0] corresponds to prompt prefill pass; [-1] is the last layer
-                prompt_hidden = gen_outputs.hidden_states[0][-1]
-                mask = inputs.attention_mask.unsqueeze(-1).to(dtype=prompt_hidden.dtype)
-                z_T_batch = ((prompt_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)).float().cpu()
+                # Single prefill forward pass: zero autoregressive decoding steps
+                outputs = model(**inputs, output_hidden_states=True)
                 
-            prompt_len = inputs.input_ids.shape[1]
+            batch_results = extract_logit_scores_and_features(
+                outputs, inputs, processor=processor,
+                temperature=1.0, threshold=0.50, window_size=w_size,
+                active_dims_list=batch_top_dims, w_slices=batch_windows,
+                base_m=base_m, base_s=base_s
+            )
+            
             for i_b, st in enumerate(batch_starts):
-                out_ids = gen_outputs.sequences[i_b][prompt_len:]
-                out_txt = processor.decode(out_ids, skip_special_tokens=True)
-                parsed = parse_vlm_json_output(out_txt, window_size=w_size)
-                
-                z_T = z_T_batch[i_b]
-                
-                teacher_cache[st] = {
-                    "is_anomaly": parsed["is_anomaly"],
-                    "anomaly_confidence": parsed.get("anomaly_confidence", 1),
-                    "anomaly_likelihood": parsed["anomaly_likelihood"],
-                    "z_feature": z_T,
-                    "anomalous_timesteps": parsed.get("anomalous_timesteps", []),
-                    "affected_dimensions": parsed.get("affected_dimensions", []),
-                    "reason": parsed.get("reason", ""),
-                    "teacher_dense_mask": parsed.get("teacher_dense_mask", torch.zeros(w_size, dtype=torch.float32))
-                }
+                teacher_cache[st] = batch_results[i_b]
                 
             # persist incrementally after each batch
             torch.save(teacher_cache, cache_file)
