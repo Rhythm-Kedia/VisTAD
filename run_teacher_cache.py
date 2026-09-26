@@ -38,17 +38,18 @@ def main():
     
     print(f"Loaded {len(raw_data)} steps of {cfg['dataset']['name']}.")
     
-    # 2. Extract targeted curriculum windows (balanced anomaly + clean normal)
+    # 2. Extract targeted curriculum windows (balanced interleaved anomaly + clean normal)
     half_w = max(1, args.num_windows // 2)
     anom_indices = np.where(labels == 1)[0]
-    curriculum_starts = []
+    anom_starts = []
     
     if len(anom_indices) > 0:
         step_stride = max(1, len(anom_indices) // half_w)
         for idx in anom_indices[::step_stride]:
             st = max(0, int(idx - 50))
             if st + w_size <= len(raw_data):
-                curriculum_starts.append(st)
+                anom_starts.append(st)
+        anom_starts = sorted(list(set(anom_starts)))[:half_w]
 
     # select clean normal anchors (windows where labels are strictly 0, after warmup baseline_steps)
     baseline_steps = cfg["dataset"].get("baseline_steps", 3000)
@@ -56,14 +57,22 @@ def main():
         s for s in range(baseline_steps, len(raw_data) - w_size, w_size)
         if np.all(labels[s : s + w_size] == 0)
     ]
+    normal_anchors = []
     if len(all_normal_starts) > 0:
         normal_stride = max(1, len(all_normal_starts) // half_w)
         normal_anchors = all_normal_starts[::normal_stride][:half_w]
-        curriculum_starts.extend(normal_anchors)
 
-    curriculum_starts = sorted(list(set(curriculum_starts)))[:args.num_windows]
+    # Interleave so every batch immediately exercises both anomaly and normal detection
+    curriculum_starts = []
+    for a, n in zip(anom_starts, normal_anchors):
+        curriculum_starts.extend([a, n])
+    if len(anom_starts) > len(normal_anchors):
+        curriculum_starts.extend(anom_starts[len(normal_anchors):])
+    elif len(normal_anchors) > len(anom_starts):
+        curriculum_starts.extend(normal_anchors[len(anom_starts):])
+    curriculum_starts = curriculum_starts[:args.num_windows]
     
-    print(f"Selected {len(curriculum_starts)} balanced curriculum windows for teacher caching.")
+    print(f"Selected {len(curriculum_starts)} balanced curriculum windows (interleaved: {len(anom_starts)} anomaly, {len(normal_anchors)} normal).")
     
     if os.path.exists(cache_file):
         print(f"Found existing teacher cache at {cache_file}. Loading to resume...")
@@ -134,7 +143,7 @@ def main():
         processor.tokenizer.padding_side = "left"
         
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id, torch_dtype=torch_dtype, device_map=device_map
+            model_id, torch_dtype=torch_dtype, device_map=device_map, attn_implementation="sdpa"
         )
         model.eval()
         
@@ -197,7 +206,7 @@ def main():
                 # Single pass: generate text while retaining prompt prefill hidden states for z_T extraction
                 gen_outputs = model.generate(
                     **inputs,
-                    max_new_tokens=80,
+                    max_new_tokens=45,
                     do_sample=False,
                     return_dict_in_generate=True,
                     output_hidden_states=True

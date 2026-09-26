@@ -24,12 +24,12 @@ SYSTEM_PROMPT = (
     "   - Sustained elevation or drop continuing across the window.\n\n"
     "Respond ONLY with a valid JSON object with NO extra text or markdown:\n"
     "{\n"
-    "  \"temporal_continuity_analysis\": \"<1 concise sentence evaluating signal levels relative to Panel 1>\",\n"
     "  \"anomaly_confidence\": <1 (normal) or 2/3 (anomaly)>,\n"
-    "  \"anomaly_likelihood\": <float 0.00 to 1.00>,\n"
     "  \"is_anomaly\": <true if anomaly_confidence >= 2, else false>,\n"
+    "  \"anomaly_likelihood\": <float 0.00 to 1.00>,\n"
+    "  \"affected_dimensions\": [\"Dim X\", ...],\n"
     "  \"anomalous_timesteps\": [<start_step>, <end_step>],\n"
-    "  \"affected_dimensions\": [\"Dim X\", ...]\n"
+    "  \"temporal_continuity_analysis\": \"<concise reason under 8 words>\"\n"
     "}"
 )
 
@@ -115,6 +115,11 @@ def parse_vlm_json_output(output_text, window_size=200):
         s_brace = clean_str.find("{")
         e_brace = clean_str.rfind("}") + 1
         clean_str = clean_str[s_brace:e_brace].strip()
+    elif "{" in clean_str:
+        s_brace = clean_str.find("{")
+        clean_str = clean_str[s_brace:].strip()
+        if not clean_str.endswith("}"):
+            clean_str = clean_str + "\n}"
         
     try:
         parsed = json.loads(clean_str)
