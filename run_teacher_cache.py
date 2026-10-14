@@ -12,6 +12,8 @@ from src.teacher_vlm import (
     extract_telemetry_metrics, extract_logit_scores_and_features
 )
 
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Frozen VLM Teacher & Cache Distillation Guidance")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
@@ -21,6 +23,8 @@ def parse_args():
     parser.add_argument("--threshold", type=float, default=None, help="Decision threshold for logit classification (overrides config)")
     parser.add_argument("--mock", action="store_true", help="Generate mock teacher cache without loading 3B model (for fast testing)")
     return parser.parse_args()
+
+
 
 def main():
     args = parse_args()
@@ -88,6 +92,7 @@ def main():
     else:
         teacher_cache = {}
     
+    
     if args.mock:
         print("Running in MOCK mode: Simulating teacher outputs for pipeline validation...")
         for st in curriculum_starts:
@@ -115,6 +120,7 @@ def main():
                 "teacher_dense_mask": torch.tensor(dense_mask, dtype=torch.float32)
             }
             torch.save(teacher_cache, cache_file)
+            
     else:
         # Check GPU Availability and Print Diagnostics
         has_cuda = torch.cuda.is_available()
@@ -236,6 +242,11 @@ def main():
                     ctx_len=ctx_len
                 )
                 
+                if st in curriculum_starts[:6]:
+                    img.save(f"debug_{st}_full.png")
+                    s = (max_px / (img.width * img.height)) ** 0.5
+                    img.resize((int(img.width * s), int(img.height * s))).save(f"debug_{st}_vlm_view.png")
+                
                 grounded_prompt = (
                     f"ACTIVE CHANNELS TELEMETRY:\n"
                     f"- Active Channels: {channel_names}\n"
@@ -295,6 +306,7 @@ def main():
             done_count = len(teacher_cache)
             print(f"[{done_count}/{len(curriculum_starts)}] Cached batch of {len(batch_starts)} windows in {b_elapsed:.2f}s ({per_w:.2f}s/w) | "
                   f"Plot: {t_plot:.0f}ms | Prep: {t_prep:.0f}ms | GPU: {t_gpu:.0f}ms | Ext/Save: {t_ext_save:.0f}ms")
+
 
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
 
