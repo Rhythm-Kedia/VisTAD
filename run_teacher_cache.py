@@ -10,7 +10,7 @@ from src.dataset import load_dataset_arrays, select_top_k_channels
 from src.teacher_vlm import (
     render_dual_horizon_image, render_annotated_plot, SYSTEM_PROMPT,
     extract_telemetry_metrics, extract_logit_scores_and_features,
-    LOC_SYSTEM, LOC_PROMPT, parse_intervals
+    LOC_SYSTEM, LOC_PROMPT, parse_intervals, signal_intervals
 )
 
 import csv
@@ -506,6 +506,24 @@ def main():
             rule_scores={"peak_z": y_peak, "max_sustained": y_sus},
         )
         
+        def add_signal_mask(z_thr, gap, min_len, key="signal_mask"):
+            for st in audit_windows:
+                v = teacher_cache[st]
+                m = np.zeros(w_size, dtype=np.float32)
+                if v["is_anomaly"]:
+                    dims = v.get("top_dims") or [int(d) for d in get_top_dims(st)]
+                    for s, e in signal_intervals(raw_data[st:st + w_size], base_m, base_s, dims, z_thr, gap, min_len):
+                        m[s:e] = 1.0
+                v[key] = torch.from_numpy(m)
+
+        print("\n--- signal mask sweep ---")
+        for z_thr in (2.5, 3.0, 4.0):
+            for gap in (5, 10, 20):
+                for min_len in (5, 10):
+                    add_signal_mask(z_thr, gap, min_len)
+                    print(f"z={z_thr} gap={gap} min_len={min_len}  ", end="")
+                    eval_localization(teacher_cache, labels, audit_windows, w_size, "signal_mask")
+                    
         for key in ("teacher_dense_mask", "vlm_mask"):
             base = eval_localization(teacher_cache, labels, audit_windows, w_size, key)
         print(f"[{'whole-window':<18}] step P/R/F1 = {base[0]:.3f}/{base[1]:.3f}/{base[2]:.3f}   <- baseline to beat")

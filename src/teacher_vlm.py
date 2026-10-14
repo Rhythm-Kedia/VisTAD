@@ -25,6 +25,18 @@ SYSTEM_PROMPT = (
     "Answer strictly with 'YES' if Panel 2 displays a genuine operational anomaly, or 'NO' if it represents normal baseline operations."
 )
 
+def signal_intervals(w_slice, base_m, base_s, dims, z_thr=3.0, gap=10, min_len=8):
+    z = np.abs((w_slice[:, dims] - base_m[dims]) / base_s[dims])
+    idx = np.flatnonzero((z >= z_thr).any(axis=1))
+    if len(idx) == 0:
+        return []
+    iv = [[int(idx[0]), int(idx[0]) + 1]]
+    for i in idx[1:]:
+        if i - iv[-1][1] <= gap:
+            iv[-1][1] = int(i) + 1
+        else:
+            iv.append([int(i), int(i) + 1])
+    return [[s, e] for s, e in iv if e - s >= min_len]
 
 def extract_telemetry_metrics(w_slice, base_m, base_s, top_dims):
     """Computes peak z-score, maximum consecutive steps exceeding 3σ, and mean deviation."""
