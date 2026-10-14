@@ -359,37 +359,20 @@ LOC_PROMPT = (
 )
 
 
-def parse_intervals(text, w=200, min_len=3, merge_gap=5):
-    """Extracts [start, end] pairs from the model text, clips them, sorts them and merges close ones."""
-    pairs = re.findall(r"\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]", text)
-    iv = []
-    for a, b in pairs:
-        s, e = int(np.clip(float(a), 0, w)), int(np.clip(float(b), 0, w))
-        if e - s >= min_len:
-            iv.append([s, e])
-    iv.sort()
-    merged = []
-    for s, e in iv:
-        if merged and s - merged[-1][1] <= merge_gap:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-    return merged
-
 from matplotlib.patches import Patch
-
+ 
 def _runs(mask):
     """Returns [(start, end), ...] for contiguous True runs in a boolean array."""
     m = np.concatenate([[0], np.asarray(mask).astype(int), [0]])
     d = np.diff(m)
     return list(zip(np.where(d == 1)[0], np.where(d == -1)[0]))
-
-
+ 
+ 
 def render_annotated_plot(data, start_idx, end_idx, dims, gt, base_mean, base_std,
-                          vlm_intervals=None, teacher_mask=None, title="", save_path=None,
+                          teacher_mask=None, title="", save_path=None,
                           figsize=(12, 6.5), dpi=110):
     """Target-window plot with ground truth (red shading) and a comparison strip:
-    GT vs VLM intervals vs teacher dense mask."""
+    GT vs teacher dense mask."""
     local = data[start_idx:end_idx]
     w = len(local)
     mu = base_mean[dims]
@@ -397,13 +380,13 @@ def render_annotated_plot(data, start_idx, end_idx, dims, gt, base_mean, base_st
     z = (local[:, dims] - mu) / sigma
     ymax = float(max(10.0, 1.1 * np.abs(z).max()))
     gt = np.asarray(gt)[:w] >= 0.5
-
+ 
     fig, (ax, ax2) = plt.subplots(2, 1, figsize=figsize, dpi=dpi, sharex=True,
                                   gridspec_kw={"height_ratios": [4, 1.2]})
     colors = plt.cm.tab10(np.arange(len(dims)) % 10)
     for i, d in enumerate(dims):
         ax.plot(np.arange(w), z[:, i], color=colors[i], linewidth=1.2, label=f"Dim {d}")
-
+ 
     ax.set_yscale("symlog", linthresh=3)
     ax.set_ylim(-ymax, ymax)
     ax.axhspan(-3, 3, color="green", alpha=0.08)
@@ -411,31 +394,27 @@ def render_annotated_plot(data, start_idx, end_idx, dims, gt, base_mean, base_st
     ax.axhline(-3, color="crimson", linestyle="--", linewidth=0.9)
     for s, e in _runs(gt):
         ax.axvspan(s, e, color="red", alpha=0.18)
-    for s, e in (vlm_intervals or []):
-        ax.axvline(s, color="royalblue", linestyle="-", linewidth=1.2)
-        ax.axvline(e, color="royalblue", linestyle="-", linewidth=1.2)
     ax.set_ylabel("z-score (symlog)")
     ax.set_title(title, fontsize=10, fontweight="bold")
     ax.grid(True, which="major", linestyle=":", alpha=0.4)
     ax.legend(loc="upper left", fontsize=7, ncol=min(6, len(dims)))
-
+ 
     # comparison strip
-    rows = [("Ground truth", [(s, e - s) for s, e in _runs(gt)], "red", 2)]
-    rows.append(("VLM intervals", [(s, e - s) for s, e in (vlm_intervals or [])], "royalblue", 1))
+    rows = [("Ground truth", [(s, e - s) for s, e in _runs(gt)], "red")]
     if teacher_mask is not None:
         tm = np.asarray(teacher_mask)[:w] > 0
-        rows.append(("Teacher mask", [(s, e - s) for s, e in _runs(tm)], "darkorange", 0))
-    for _, spans, c, y in rows:
+        rows.append(("Teacher mask", [(s, e - s) for s, e in _runs(tm)], "darkorange"))
+    for y, (_, spans, c) in enumerate(rows):
         if spans:
             ax2.broken_barh(spans, (y - 0.4, 0.8), facecolors=c, alpha=0.8)
-    ax2.set_yticks([r[3] for r in rows])
+    ax2.set_yticks(range(len(rows)))
     ax2.set_yticklabels([r[0] for r in rows], fontsize=8)
-    ax2.set_ylim(-0.6, 2.6)
+    ax2.set_ylim(-0.6, len(rows) - 0.4)
     ax2.set_xlim(0, w)
     ax2.set_xlabel("step in window")
     ax2.xaxis.set_major_locator(MultipleLocator(20))
     ax2.grid(True, axis="x", linestyle=":", alpha=0.4)
-
+ 
     fig.tight_layout()
     if save_path:
         fig.savefig(save_path)
@@ -445,3 +424,5 @@ def render_annotated_plot(data, start_idx, end_idx, dims, gt, base_mean, base_st
     img = Image.fromarray(np.asarray(fig.canvas.buffer_rgba())[:, :, :3])
     plt.close(fig)
     return img
+
+

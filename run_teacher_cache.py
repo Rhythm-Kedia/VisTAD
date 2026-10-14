@@ -10,7 +10,7 @@ from src.dataset import load_dataset_arrays, select_top_k_channels
 from src.teacher_vlm import (
     render_dual_horizon_image, render_annotated_plot, SYSTEM_PROMPT,
     extract_telemetry_metrics, extract_logit_scores_and_features,
-    LOC_SYSTEM, LOC_PROMPT, parse_intervals, signal_intervals
+    signal_intervals
 )
 
 import csv
@@ -316,26 +316,6 @@ def main():
                 logits = model_ref.lm_head(last_tok).squeeze(1).float().cpu()
             return logits, z_T
         
-                # Second processor for the localization pass: larger image budget so tick labels stay readable
-        loc_processor = AutoProcessor.from_pretrained(model_id, min_pixels=min_px, max_pixels=512 * 28 * 28)
-        loc_processor.tokenizer.padding_side = "left"
-
-        PREFILL = '{"intervals": [['
-
-        def vlm_localize(model_ref, dev, imgs, max_new_tokens=64):
-            msgs = [[{"role": "system", "content": [{"type": "text", "text": LOC_SYSTEM}]},
-                    {"role": "user", "content": [{"type": "image", "image": im},
-                                                {"type": "text", "text": LOC_PROMPT}]}] for im in imgs]
-            texts = [loc_processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) + PREFILL
-                    for m in msgs]
-            image_inputs, video_inputs = process_vision_info(msgs)
-            inp = loc_processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
-            inp = {k: v.to(dev) if isinstance(v, torch.Tensor) else v for k, v in inp.items()}
-            with torch.inference_mode():
-                out = model_ref.generate(**inp, max_new_tokens=max_new_tokens, do_sample=False)
-            dec = loc_processor.batch_decode(out[:, inp["input_ids"].shape[1]:], skip_special_tokens=True)
-            return [PREFILL + d for d in dec]
-                
         decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
         pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
         print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}, threshold={decision_threshold}).")
@@ -381,10 +361,10 @@ def main():
                 )
                 
                 if args.display_images and st in curriculum_starts[:args.display_count]:
-                    img.save(os.path.join(args.debug_dir, f"debug_{st}_full.png"))
+                    img.save(os.path.join(debug_dir, f"debug_{st}_full.png"))
                     s = min(1.0, (max_px / (img.width * img.height)) ** 0.5)
                     vlm_view = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
-                    vlm_view.save(os.path.join(args.debug_dir, f"debug_{st}_vlm_view.png"))
+                    vlm_view.save(os.path.join(debug_dir, f"debug_{st}_vlm_view.png"))
                         
                 # if st in curriculum_starts[:6]:
                 #     img.save(f"debug_{st}_full.png")
@@ -453,38 +433,6 @@ def main():
             print(f"[{done_count}/{len(curriculum_starts)}] Cached batch of {len(batch_starts)} windows in {b_elapsed:.2f}s ({per_w:.2f}s/w) | "
                   f"Plot: {t_plot:.0f}ms | Prep: {t_prep:.0f}ms | GPU: {t_gpu:.0f}ms | Ext/Save: {t_ext_save:.0f}ms")
 
-                # Localization pass: only windows the teacher flagged and that haven't been localized yet
-                
-                
-        todo = [st for st in curriculum_starts
-                if st in teacher_cache and teacher_cache[st]["is_anomaly"] and "vlm_intervals" not in teacher_cache[st]]
-        print(f"Localization pass on {len(todo)} flagged windows...")
-        loc_bs = max(1, args.batch_size // 2)                    # larger images and generation need more memory
-        
-    
-        for i in range(0, len(todo), loc_bs):
-            chunk = todo[i:i + loc_bs]
-            imgs = []
-            for st in chunk:
-                dims = teacher_cache[st].get("top_dims")
-                if dims is None:                      # old cache entry
-                    dims = [int(d) for d in get_top_dims(st)]
-                    teacher_cache[st]["top_dims"] = dims
-                imgs.append(render_dual_horizon_image(
-                    raw_data, st, st + w_size, dims,
-                    base_mean=base_m, base_std=base_s, ctx_len=ctx_len,
-                    px=(840, 476), tick_step=20))
-            texts = vlm_localize(models[0], devices[0], imgs)
-            for st, t in zip(chunk, texts):
-                iv = parse_intervals(t, w_size)
-                m = np.zeros(w_size, dtype=np.float32)
-                for s, e in iv:
-                    m[s:e] = 1.0
-                teacher_cache[st]["vlm_intervals"] = iv
-                teacher_cache[st]["vlm_raw"] = t                 # raw model text, for inspection
-                teacher_cache[st]["vlm_mask"] = torch.from_numpy(m)
-            torch.save(teacher_cache, cache_file)
-
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
 
     # Automated Teacher Diagnostic Audit against Ground Truth
@@ -510,9 +458,25 @@ def main():
             rule_scores={"peak_z": y_peak, "max_sustained": y_sus},
         )
         
-        
-        for key in ("teacher_dense_mask", "vlm_mask"):
-            base = eval_localization(teacher_cache, labels, audit_windows, w_size, key)
+        def add_signal_mask(z_thr, gap, min_len, key="signal_mask"):
+            for st in audit_windows:
+                v = teacher_cache[st]
+                m = np.zeros(w_size, dtype=np.float32)
+                if v["is_anomaly"]:
+                    dims = v.get("top_dims") or [int(d) for d in get_top_dims(st)]
+                    for s, e in signal_intervals(raw_data[st:st + w_size], base_m, base_s, dims, z_thr, gap, min_len):
+                        m[s:e] = 1.0
+                v[key] = torch.from_numpy(m)
+
+        print("\n--- signal mask sweep ---")
+        for z_thr in (2.5, 3.0, 4.0):
+            for gap in (5, 10, 20):
+                for min_len in (5, 10):
+                    add_signal_mask(z_thr, gap, min_len)
+                    print(f"z={z_thr} gap={gap} min_len={min_len}  ", end="")
+                    eval_localization(teacher_cache, labels, audit_windows, w_size, "signal_mask")
+                    
+        base = eval_localization(teacher_cache, labels, audit_windows, w_size, "teacher_dense_mask")
         print(f"[{'whole-window':<18}] step P/R/F1 = {base[0]:.3f}/{base[1]:.3f}/{base[2]:.3f}   <- baseline to beat")
     else:
         print("No windows to audit.")
@@ -524,14 +488,12 @@ def main():
             dims = v.get("top_dims") or [int(d) for d in get_top_dims(st)]
             gt_w = labels[st:st + w_size]
             title = (f"window {st} | GT anomaly: {bool(np.any(gt_w >= 0.5))} | "
-                     f"teacher p={v.get('anomaly_likelihood', 0):.2f} flagged={v['is_anomaly']} | "
-                     f"VLM intervals: {v.get('vlm_intervals', [])}")
+                     f"teacher p={v.get('anomaly_likelihood', 0):.2f} flagged={v['is_anomaly']}")
             render_annotated_plot(
                 raw_data, st, st + w_size, dims, gt_w, base_m, base_s,
-                vlm_intervals=v.get("vlm_intervals", []),
                 teacher_mask=v.get("teacher_dense_mask"),
                 title=title,
-                save_path=os.path.join(args.debug_dir, f"debug_{st}_annotated.png"))
+                save_path=os.path.join(debug_dir, f"debug_{st}_annotated.png"))
         # print(f"Saved {len(shown)} annotated plots to {args.debug_dir}")
 
 if __name__ == "__main__":
