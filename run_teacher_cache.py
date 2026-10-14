@@ -8,7 +8,7 @@ import torch
 
 from src.dataset import load_dataset_arrays, select_top_k_channels
 from src.teacher_vlm import (
-    render_dual_horizon_image, SYSTEM_PROMPT,
+    render_dual_horizon_image, render_annotated_plot, SYSTEM_PROMPT,
     extract_telemetry_metrics, extract_logit_scores_and_features,
     LOC_SYSTEM, LOC_PROMPT, parse_intervals
 )
@@ -17,6 +17,10 @@ import csv
 import datetime
 from sklearn.metrics import (roc_auc_score, average_precision_score,
                              precision_recall_curve, matthews_corrcoef)
+
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from qwen_vl_utils import process_vision_info
+
 
 def eval_localization(cache, labels, starts, w_size, key):
     G, P, F, ious, hits, n_anom = [], [], [], [], 0, 0
@@ -184,6 +188,17 @@ def main():
     
     print(f"Selected {len(curriculum_starts)} balanced curriculum windows (interleaved: {len(anom_starts)} anomaly, {len(normal_anchors)} normal).")
     
+    ctx_len = cfg["teacher"].get("macro_context_len", 800)
+
+    def get_top_dims(st):
+                end = st + w_size
+                ctx_slice = raw_data[max(0, st - ctx_len):st]
+                return select_top_k_channels(
+                    raw_data[st:end], base_mean=base_m, base_std=base_s, ctx_data=ctx_slice,
+                    strategy=cfg["channel_filter"].get("strategy", "median_shift"),
+                    k=cfg["channel_filter"].get("k", 6),
+                )
+                
     if os.path.exists(cache_file):
         print(f"Found existing teacher cache at {cache_file}. Loading to resume...")
         teacher_cache = torch.load(cache_file)
@@ -242,8 +257,6 @@ def main():
             primary_device = "cpu"
 
         print(f"Loading {cfg['teacher']['model_id']} with token budget capping and left-padding...")
-        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-        from qwen_vl_utils import process_vision_info
         
         model_id = cfg["teacher"]["model_id"]
         # token budget: cap visual tokens to ~252 per image (down from 1,008) to slash GPU compute by ~4x
@@ -312,7 +325,6 @@ def main():
                 out = model_ref.generate(**inp, max_new_tokens=max_new_tokens, do_sample=False)
             return loc_processor.batch_decode(out[:, inp["input_ids"].shape[1]:], skip_special_tokens=True)
         
-        ctx_len = cfg["teacher"].get("macro_context_len", 800)
         decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
         pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
         print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}, threshold={decision_threshold}).")
@@ -357,11 +369,23 @@ def main():
                     ctx_len=ctx_len
                 )
                 
-                if args.display_images and st in curriculum_starts[:args.display_count]:
-                    img.save(os.path.join(args.debug_dir, f"debug_{st}_full.png"))
-                    s = min(1.0, (max_px / (img.width * img.height)) ** 0.5)
-                    vlm_view = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
-                    vlm_view.save(os.path.join(args.debug_dir, f"debug_{st}_vlm_view.png"))
+                if args.display_images:
+                    shown = [st for st in curriculum_starts[:args.display_count] if st in teacher_cache]
+                    for st in shown:
+                        v = teacher_cache[st]
+                        dims = v.get("top_dims") or get_top_dims(st)
+                        gt_w = labels[st:st + w_size]
+                        title = (f"window {st} | GT anomaly: {bool(np.any(gt_w >= 0.5))} | "
+                                f"teacher p={v.get('anomaly_likelihood', 0):.2f} flagged={v['is_anomaly']} | "
+                                f"VLM intervals: {v.get('vlm_intervals', [])}")
+                        render_annotated_plot(
+                            raw_data, st, st + w_size, dims, gt_w, base_m, base_s,
+                            vlm_intervals=v.get("vlm_intervals", []),
+                            teacher_mask=v.get("teacher_dense_mask"),
+                            title=title,
+                            save_path=os.path.join(args.debug_dir, f"debug_{st}_annotated.png"))
+                    print(f"Saved {len(shown)} annotated plots to {args.debug_dir}")
+                        
                 # if st in curriculum_starts[:6]:
                 #     img.save(f"debug_{st}_full.png")
                 #     s = (max_px / (img.width * img.height)) ** 0.5
@@ -414,7 +438,9 @@ def main():
                 last_logits=last_logits, z_T_batch=z_T_batch
             )
             
+                
             for i_b, st in enumerate(batch_starts):
+                batch_results[i_b]["top_dims"] = [int(d) for d in batch_top_dims[i_b]]
                 teacher_cache[st] = batch_results[i_b]
                 
             # persist incrementally after each batch
@@ -428,15 +454,26 @@ def main():
                   f"Plot: {t_plot:.0f}ms | Prep: {t_prep:.0f}ms | GPU: {t_gpu:.0f}ms | Ext/Save: {t_ext_save:.0f}ms")
 
                 # Localization pass: only windows the teacher flagged and that haven't been localized yet
+                
+                
         todo = [st for st in curriculum_starts
                 if st in teacher_cache and teacher_cache[st]["is_anomaly"] and "vlm_intervals" not in teacher_cache[st]]
         print(f"Localization pass on {len(todo)} flagged windows...")
         loc_bs = max(1, args.batch_size // 2)                    # larger images and generation need more memory
+        
+    
         for i in range(0, len(todo), loc_bs):
             chunk = todo[i:i + loc_bs]
-            imgs = [render_dual_horizon_image(raw_data, st, st + w_size, teacher_cache[st]["top_dims"],
-                                              base_mean=base_m, base_std=base_s, ctx_len=ctx_len,
-                                              px=(840, 476), tick_step=20) for st in chunk]
+            imgs = []
+            for st in chunk:
+                dims = teacher_cache[st].get("top_dims")
+                if dims is None:                      # old cache entry
+                    dims = [int(d) for d in get_top_dims(st)]
+                    teacher_cache[st]["top_dims"] = dims
+                imgs.append(render_dual_horizon_image(
+                    raw_data, st, st + w_size, dims,
+                    base_mean=base_m, base_std=base_s, ctx_len=ctx_len,
+                    px=(840, 476), tick_step=20))
             texts = vlm_localize(models[0], devices[0], imgs)
             for st, t in zip(chunk, texts):
                 iv = parse_intervals(t, w_size)
