@@ -44,9 +44,8 @@ def extract_telemetry_metrics(w_slice, base_m, base_s, top_dims):
     max_sustained = max(runs) if runs else 0
     return peak_z, max_sustained, mean_z
 
-
 def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, base_std=None,
-                              save_path=None, ctx_len=800, px=(588, 336), dpi=100):
+                              save_path=None, ctx_len=800, px=(588, 336), dpi=100, tick_step=50):
     """Dual-panel plot sized to the VLM pixel budget (588x336 <= 256*28*28).
     Shared symlog y-axis: linear inside +-3 sigma, logarithmic beyond, so spikes of 25 and 1200 sigma both fit."""
     ctx_start = max(0, start_idx - ctx_len)
@@ -78,8 +77,10 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, ba
     ax_macro.set_title("PANEL 1: BASELINE (steps before the target window)",
                        fontsize=8, fontweight="bold", color="navy")
     ax_micro.set_xlim(0, w_len)
-    ax_micro.xaxis.set_major_locator(MultipleLocator(50))
+    
+    ax_micro.xaxis.set_major_locator(MultipleLocator(tick_step))
     ax_micro.xaxis.set_minor_locator(MultipleLocator(10))
+    
     ax_micro.set_title(f"PANEL 2: TARGET WINDOW UNDER INSPECTION (steps 0 to {w_len})",
                        fontsize=8, fontweight="bold", color="darkgreen")
     ax_micro.set_xlabel("step", fontsize=8)
@@ -331,3 +332,34 @@ def extract_logit_scores_and_features(outputs=None, inputs=None, processor=None,
         })
         
     return results
+
+LOC_SYSTEM = "You are a reliability engineer inspecting sensor telemetry plots. Reply with JSON only."
+
+LOC_PROMPT = (
+    "The image shows z-normalized sensor channels (one colored line per channel, 0 = typical level). "
+    "The green band between the red dashed lines is the normal range (±3 standard deviations).\n"
+    "- PANEL 1 (top): normal baseline behavior before the target window.\n"
+    "- PANEL 2 (bottom): the target window. Its x-axis shows steps 0 to 200 with labels every 20 steps.\n\n"
+    "An anomaly was detected in PANEL 2. Using the x-axis labels of PANEL 2, list the step ranges where "
+    "the anomalous behavior happens (lines outside the band, a level shift, or channels breaking from "
+    "PANEL 1 together). Reply with JSON only, for example {\"intervals\": [[60, 110], [150, 170]]}. "
+    "Use 0 <= start < end <= 200. Reply {\"intervals\": []} if you see none."
+)
+
+
+def parse_intervals(text, w=200, min_len=3, merge_gap=5):
+    """Extracts [start, end] pairs from the model text, clips them, sorts them and merges close ones."""
+    pairs = re.findall(r"\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]", text)
+    iv = []
+    for a, b in pairs:
+        s, e = int(np.clip(float(a), 0, w)), int(np.clip(float(b), 0, w))
+        if e - s >= min_len:
+            iv.append([s, e])
+    iv.sort()
+    merged = []
+    for s, e in iv:
+        if merged and s - merged[-1][1] <= merge_gap:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return merged

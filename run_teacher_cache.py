@@ -8,14 +8,39 @@ import torch
 
 from src.dataset import load_dataset_arrays, select_top_k_channels
 from src.teacher_vlm import (
-    render_dual_horizon_image, parse_vlm_json_output, SYSTEM_PROMPT,
-    extract_telemetry_metrics, extract_logit_scores_and_features
+    render_dual_horizon_image, SYSTEM_PROMPT,
+    extract_telemetry_metrics, extract_logit_scores_and_features,
+    LOC_SYSTEM, LOC_PROMPT, parse_intervals
 )
 
 import csv
 import datetime
 from sklearn.metrics import (roc_auc_score, average_precision_score,
                              precision_recall_curve, matthews_corrcoef)
+
+def eval_localization(cache, labels, starts, w_size, key):
+    G, P, F, ious, hits, n_anom = [], [], [], [], 0, 0
+    for st in starts:
+        if st not in cache:
+            continue
+        g = labels[st:st + w_size] >= 0.5
+        p = cache[st][key].numpy() > 0 if key in cache[st] else np.zeros(w_size, dtype=bool)   # unflagged = no mask
+        G.append(g); P.append(p)
+        F.append(np.full(w_size, bool(cache[st]["is_anomaly"])))          # whole-window baseline
+        if g.any():
+            n_anom += 1; hits += int((g & p).any())
+            u = (g | p).sum(); ious.append((g & p).sum() / u if u else 0.0)
+    g, p, f = np.concatenate(G), np.concatenate(P), np.concatenate(F)
+
+    def prf(x):
+        tp = (g & x).sum(); fp = (~g & x).sum(); fn = (g & ~x).sum()
+        pr = tp / max(1, tp + fp); rc = tp / max(1, tp + fn)
+        return pr, rc, 2 * pr * rc / max(1e-9, pr + rc)
+
+    a, b = prf(p), prf(f)
+    print(f"[{key:<18}] step P/R/F1 = {a[0]:.3f}/{a[1]:.3f}/{a[2]:.3f} | hit rate {hits / max(1, n_anom):.1%} | "
+          f"mean IoU {np.mean(ious) if ious else float('nan'):.3f}")
+    return b
 
 def report_metrics(y_true, scores, threshold, tag, rule_scores=None, log_path=None, extra=None):
     y_true = np.asarray(y_true).astype(int)
@@ -271,6 +296,22 @@ def main():
                 logits = model_ref.lm_head(last_tok).squeeze(1).float().cpu()
             return logits, z_T
         
+                # Second processor for the localization pass: larger image budget so tick labels stay readable
+        loc_processor = AutoProcessor.from_pretrained(model_id, min_pixels=min_px, max_pixels=512 * 28 * 28)
+        loc_processor.tokenizer.padding_side = "left"
+
+        def vlm_localize(model_ref, dev, imgs, max_new_tokens=48):
+            msgs = [[{"role": "system", "content": [{"type": "text", "text": LOC_SYSTEM}]},
+                     {"role": "user", "content": [{"type": "image", "image": im},
+                                                  {"type": "text", "text": LOC_PROMPT}]}] for im in imgs]
+            texts = [loc_processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in msgs]
+            image_inputs, video_inputs = process_vision_info(msgs)
+            inp = loc_processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
+            inp = {k: v.to(dev) if isinstance(v, torch.Tensor) else v for k, v in inp.items()}
+            with torch.inference_mode():
+                out = model_ref.generate(**inp, max_new_tokens=max_new_tokens, do_sample=False)
+            return loc_processor.batch_decode(out[:, inp["input_ids"].shape[1]:], skip_special_tokens=True)
+        
         ctx_len = cfg["teacher"].get("macro_context_len", 800)
         decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
         pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
@@ -386,6 +427,26 @@ def main():
             print(f"[{done_count}/{len(curriculum_starts)}] Cached batch of {len(batch_starts)} windows in {b_elapsed:.2f}s ({per_w:.2f}s/w) | "
                   f"Plot: {t_plot:.0f}ms | Prep: {t_prep:.0f}ms | GPU: {t_gpu:.0f}ms | Ext/Save: {t_ext_save:.0f}ms")
 
+                # Localization pass: only windows the teacher flagged and that haven't been localized yet
+        todo = [st for st in curriculum_starts
+                if st in teacher_cache and teacher_cache[st]["is_anomaly"] and "vlm_intervals" not in teacher_cache[st]]
+        print(f"Localization pass on {len(todo)} flagged windows...")
+        loc_bs = max(1, args.batch_size // 2)                    # larger images and generation need more memory
+        for i in range(0, len(todo), loc_bs):
+            chunk = todo[i:i + loc_bs]
+            imgs = [render_dual_horizon_image(raw_data, st, st + w_size, teacher_cache[st]["top_dims"],
+                                              base_mean=base_m, base_std=base_s, ctx_len=ctx_len,
+                                              px=(840, 476), tick_step=20) for st in chunk]
+            texts = vlm_localize(models[0], devices[0], imgs)
+            for st, t in zip(chunk, texts):
+                iv = parse_intervals(t, w_size)
+                m = np.zeros(w_size, dtype=np.float32)
+                for s, e in iv:
+                    m[s:e] = 1.0
+                teacher_cache[st]["vlm_intervals"] = iv
+                teacher_cache[st]["vlm_raw"] = t                 # raw model text, for inspection
+                teacher_cache[st]["vlm_mask"] = torch.from_numpy(m)
+            torch.save(teacher_cache, cache_file)
 
     print(f"Teacher Cache saved successfully ({len(teacher_cache)} windows) to: {cache_file}")
 
@@ -411,6 +472,10 @@ def main():
             tag=f"{cfg['dataset']['name']}/{cfg['dataset'].get('entity', '')}",
             rule_scores={"peak_z": y_peak, "max_sustained": y_sus},
         )
+        
+        for key in ("teacher_dense_mask", "vlm_mask"):
+            base = eval_localization(teacher_cache, labels, audit_windows, w_size, key)
+        print(f"[{'whole-window':<18}] step P/R/F1 = {base[0]:.3f}/{base[1]:.3f}/{base[2]:.3f}   <- baseline to beat")
     else:
         print("No windows to audit.")
 
