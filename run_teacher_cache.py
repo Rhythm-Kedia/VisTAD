@@ -12,7 +12,69 @@ from src.teacher_vlm import (
     extract_telemetry_metrics, extract_logit_scores_and_features
 )
 
+import csv
+import datetime
+from sklearn.metrics import (roc_auc_score, average_precision_score,
+                             precision_recall_curve, matthews_corrcoef)
 
+def report_metrics(y_true, scores, threshold, tag, rule_scores=None, log_path=None, extra=None):
+    y_true = np.asarray(y_true).astype(int)
+    scores = np.asarray(scores, dtype=float)
+    pred = (scores >= threshold).astype(int)
+
+    tp = int(((pred == 1) & (y_true == 1)).sum()); fp = int(((pred == 1) & (y_true == 0)).sum())
+    tn = int(((pred == 0) & (y_true == 0)).sum()); fn = int(((pred == 0) & (y_true == 1)).sum())
+    n = tp + fp + tn + fn
+    prec = tp / max(1, tp + fp); rec = tp / max(1, tp + fn); spec = tn / max(1, tn + fp)
+    f1 = 2 * prec * rec / max(1e-9, prec + rec)
+    acc = (tp + tn) / max(1, n); bal_acc = (rec + spec) / 2
+    mcc = matthews_corrcoef(y_true, pred) if len(set(pred)) > 1 and len(set(y_true)) > 1 else float("nan")
+    prev = y_true.mean() if n else float("nan")
+    yes_f1 = 2 * prev / (1 + prev) if prev > 0 else float("nan")      # always-YES baseline: precision=prev, recall=1
+
+    two_class = len(set(y_true)) == 2
+    auroc = roc_auc_score(y_true, scores) if two_class else float("nan")
+    auprc = average_precision_score(y_true, scores) if two_class else float("nan")
+    best_f1, best_thr = float("nan"), float("nan")
+    if two_class:
+        p, r, t = precision_recall_curve(y_true, scores)
+        f = 2 * p[:-1] * r[:-1] / np.maximum(p[:-1] + r[:-1], 1e-9)
+        if len(f):
+            best_f1, best_thr = float(f.max()), float(t[f.argmax()])
+
+    print("\n" + "=" * 70)
+    print(f"  RUN SUMMARY  [{tag}]  windows={n}  positives={int(y_true.sum())} ({prev:.1%})")
+    print("=" * 70)
+    print(f"Threshold {threshold:.2f}:  TP={tp}  FP={fp}  TN={tn}  FN={fn}")
+    print(f"  Precision {prec:.3f} | Recall {rec:.3f} | F1 {f1:.3f} | Specificity {spec:.3f}")
+    print(f"  Accuracy {acc:.3f} | Balanced acc {bal_acc:.3f} | MCC {mcc:.3f}")
+    print(f"Threshold-free:  AUROC {auroc:.3f} | AUPRC {auprc:.3f} (chance = {prev:.3f})")
+    print(f"  Best-F1 threshold {best_thr:.3f} -> F1 {best_f1:.3f}  (tuned on this data, optimistic)")
+    print(f"Baseline 'always YES':  F1 {yes_f1:.3f}  <- your F1 must clearly beat this")
+    rule_aucs = {}
+    if rule_scores and two_class:
+        for name, vals in rule_scores.items():
+            vals = np.asarray(vals, dtype=float)
+            if not np.isnan(vals).any():
+                rule_aucs[name] = roc_auc_score(y_true, vals)
+                print(f"Rule '{name}' AUROC: {rule_aucs[name]:.3f}")
+    print("=" * 70 + "\n")
+
+    if log_path:
+        row = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "tag": tag,
+               "n": n, "pos_rate": round(prev, 4), "thr": threshold, "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+               "precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4),
+               "specificity": round(spec, 4), "bal_acc": round(bal_acc, 4), "mcc": round(mcc, 4),
+               "auroc": round(auroc, 4), "auprc": round(auprc, 4), "always_yes_f1": round(yes_f1, 4),
+               "best_f1": round(best_f1, 4), "best_thr": round(best_thr, 4)}
+        row.update({f"auroc_{k}": round(v, 4) for k, v in rule_aucs.items()})
+        if extra: row.update(extra)
+        new = not os.path.exists(log_path)
+        with open(log_path, "a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(row.keys()))
+            if new: w.writeheader()
+            w.writerow(row)
+        print(f"Appended to {log_path}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Frozen VLM Teacher & Cache Distillation Guidance")
@@ -331,44 +393,26 @@ def main():
     print("\n" + "=" * 70)
     print("                 TEACHER ACCURACY & QUALITY AUDIT                 ")
     print("=" * 70)
-    tp, fp, tn, fn = 0, 0, 0, 0
+    
+    
+    decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
     audit_windows = [st for st in curriculum_starts if st in teacher_cache]
+    y_true, y_score, y_peak, y_sus = [], [], [], []
     for st in audit_windows:
         v = teacher_cache[st]
-        gt_window = labels[st : st + w_size]
-        is_gt_anom = bool(np.any(gt_window >= 0.5))
-        pred_anom = bool(v.get("is_anomaly", False))
-        score = v.get("anomaly_likelihood", 0.0)
-        conf = v.get("anomaly_confidence", 1)
-        
-        if is_gt_anom and pred_anom:
-            tp += 1
-            tag = "TP [Hit]"
-        elif not is_gt_anom and not pred_anom:
-            tn += 1
-            tag = "TN [Clean]"
-        elif not is_gt_anom and pred_anom:
-            fp += 1
-            tag = "FP [False Alarm]"
-        else:
-            fn += 1
-            tag = "FN [Missed]"
-            
-        print(f"Window @ {st:05d} | GT: {'ANOM' if is_gt_anom else 'NORM':4s} | Pred: {'ANOM' if pred_anom else 'NORM':4s} (Score={score:.2f}, Conf={conf}) | {tag}")
+        y_true.append(int(np.any(labels[st: st + w_size] >= 0.5)))
+        y_score.append(float(v.get("anomaly_likelihood", 0.0)))
+        y_peak.append(v.get("peak_z", np.nan))
+        y_sus.append(v.get("max_sustained", np.nan))
 
-    total = tp + fp + tn + fn
-    acc = (tp + tn) / max(1, total)
-    prec = tp / max(1, tp + fp)
-    rec = tp / max(1, tp + fn)
-    f1 = 2 * prec * rec / max(1e-6, prec + rec)
-
-    print("-" * 70)
-    print(f"Summary: TP={tp}, FP={fp}, TN={tn}, FN={fn} | Total Windows: {total}")
-    print(f"Teacher Accuracy:  {acc:.1%}")
-    print(f"Teacher Precision: {prec:.1%}")
-    print(f"Teacher Recall:    {rec:.1%}")
-    print(f"Teacher F1-Score:  {f1:.3f}")
-    print("=" * 70 + "\n")
+    if y_true:
+        report_metrics(
+            y_true, y_score, decision_threshold,
+            tag=f"{cfg['dataset']['name']}/{cfg['dataset'].get('entity', '')}",
+            rule_scores={"peak_z": y_peak, "max_sustained": y_sus},
+        )
+    else:
+        print("No windows to audit.")
 
 if __name__ == "__main__":
     main()
