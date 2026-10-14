@@ -121,21 +121,28 @@ def parse_args():
 
 
 def main():
+    
     args = parse_args()
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
-        
+
+    # CLI overrides config
+    if args.entity:
+        cfg["dataset"]["entity"] = args.entity
+    entity = cfg["dataset"].get("entity", "machine-1-1")
+    print(f"Entity: {entity}")
+
     cache_dir = cfg["teacher"].get("cache_dir", "cache")
     os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f"{cfg['dataset']['name']}_teacher_cache.pt")
-    
+    cache_file = os.path.join(cache_dir, f"{cfg['dataset']['name']}_{entity}_teacher_cache.pt")
+
+    debug_dir = os.path.join(args.debug_dir, entity)
     if args.display_images:
-            os.makedirs(args.debug_dir, exist_ok=True)
-    
-    # 1. Load Raw Data
+        os.makedirs(debug_dir, exist_ok=True)
+
     raw_data, labels = load_dataset_arrays(
         dataset_name=cfg["dataset"]["name"],
-        entity=cfg["dataset"].get("entity", "machine-1-1"),
+        entity=entity,
         data_dir=cfg["dataset"].get("data_dir", "data")
     )
     
@@ -520,7 +527,7 @@ def main():
                 teacher_mask=v.get("teacher_dense_mask"),
                 title=title,
                 save_path=os.path.join(args.debug_dir, f"debug_{st}_annotated.png"))
-        print(f"Saved {len(shown)} annotated plots to {args.debug_dir}")
+        # print(f"Saved {len(shown)} annotated plots to {args.debug_dir}")
 
 if __name__ == "__main__":
     main()
