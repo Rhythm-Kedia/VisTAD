@@ -320,18 +320,22 @@ def main():
         loc_processor = AutoProcessor.from_pretrained(model_id, min_pixels=min_px, max_pixels=512 * 28 * 28)
         loc_processor.tokenizer.padding_side = "left"
 
-        def vlm_localize(model_ref, dev, imgs, max_new_tokens=48):
+        PREFILL = '{"intervals": [['
+
+        def vlm_localize(model_ref, dev, imgs, max_new_tokens=64):
             msgs = [[{"role": "system", "content": [{"type": "text", "text": LOC_SYSTEM}]},
-                     {"role": "user", "content": [{"type": "image", "image": im},
-                                                  {"type": "text", "text": LOC_PROMPT}]}] for im in imgs]
-            texts = [loc_processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in msgs]
+                    {"role": "user", "content": [{"type": "image", "image": im},
+                                                {"type": "text", "text": LOC_PROMPT}]}] for im in imgs]
+            texts = [loc_processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) + PREFILL
+                    for m in msgs]
             image_inputs, video_inputs = process_vision_info(msgs)
             inp = loc_processor(text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
             inp = {k: v.to(dev) if isinstance(v, torch.Tensor) else v for k, v in inp.items()}
             with torch.inference_mode():
                 out = model_ref.generate(**inp, max_new_tokens=max_new_tokens, do_sample=False)
-            return loc_processor.batch_decode(out[:, inp["input_ids"].shape[1]:], skip_special_tokens=True)
-        
+            dec = loc_processor.batch_decode(out[:, inp["input_ids"].shape[1]:], skip_special_tokens=True)
+            return [PREFILL + d for d in dec]
+                
         decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
         pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
         print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}, threshold={decision_threshold}).")
@@ -506,24 +510,7 @@ def main():
             rule_scores={"peak_z": y_peak, "max_sustained": y_sus},
         )
         
-        def add_signal_mask(z_thr, gap, min_len, key="signal_mask"):
-            for st in audit_windows:
-                v = teacher_cache[st]
-                m = np.zeros(w_size, dtype=np.float32)
-                if v["is_anomaly"]:
-                    dims = v.get("top_dims") or [int(d) for d in get_top_dims(st)]
-                    for s, e in signal_intervals(raw_data[st:st + w_size], base_m, base_s, dims, z_thr, gap, min_len):
-                        m[s:e] = 1.0
-                v[key] = torch.from_numpy(m)
-
-        print("\n--- signal mask sweep ---")
-        for z_thr in (2.5, 3.0, 4.0):
-            for gap in (5, 10, 20):
-                for min_len in (5, 10):
-                    add_signal_mask(z_thr, gap, min_len)
-                    print(f"z={z_thr} gap={gap} min_len={min_len}  ", end="")
-                    eval_localization(teacher_cache, labels, audit_windows, w_size, "signal_mask")
-                    
+        
         for key in ("teacher_dense_mask", "vlm_mask"):
             base = eval_localization(teacher_cache, labels, audit_windows, w_size, key)
         print(f"[{'whole-window':<18}] step P/R/F1 = {base[0]:.3f}/{base[1]:.3f}/{base[2]:.3f}   <- baseline to beat")
