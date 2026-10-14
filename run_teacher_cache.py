@@ -369,22 +369,11 @@ def main():
                     ctx_len=ctx_len
                 )
                 
-                if args.display_images:
-                    shown = [st for st in curriculum_starts[:args.display_count] if st in teacher_cache]
-                    for st in shown:
-                        v = teacher_cache[st]
-                        dims = v.get("top_dims") or get_top_dims(st)
-                        gt_w = labels[st:st + w_size]
-                        title = (f"window {st} | GT anomaly: {bool(np.any(gt_w >= 0.5))} | "
-                                f"teacher p={v.get('anomaly_likelihood', 0):.2f} flagged={v['is_anomaly']} | "
-                                f"VLM intervals: {v.get('vlm_intervals', [])}")
-                        render_annotated_plot(
-                            raw_data, st, st + w_size, dims, gt_w, base_m, base_s,
-                            vlm_intervals=v.get("vlm_intervals", []),
-                            teacher_mask=v.get("teacher_dense_mask"),
-                            title=title,
-                            save_path=os.path.join(args.debug_dir, f"debug_{st}_annotated.png"))
-                    print(f"Saved {len(shown)} annotated plots to {args.debug_dir}")
+                if args.display_images and st in curriculum_starts[:args.display_count]:
+                    img.save(os.path.join(args.debug_dir, f"debug_{st}_full.png"))
+                    s = min(1.0, (max_px / (img.width * img.height)) ** 0.5)
+                    vlm_view = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
+                    vlm_view.save(os.path.join(args.debug_dir, f"debug_{st}_vlm_view.png"))
                         
                 # if st in curriculum_starts[:6]:
                 #     img.save(f"debug_{st}_full.png")
@@ -515,6 +504,23 @@ def main():
         print(f"[{'whole-window':<18}] step P/R/F1 = {base[0]:.3f}/{base[1]:.3f}/{base[2]:.3f}   <- baseline to beat")
     else:
         print("No windows to audit.")
+        
+    if args.display_images:
+        shown = [st for st in curriculum_starts[:args.display_count] if st in teacher_cache]
+        for st in shown:
+            v = teacher_cache[st]
+            dims = v.get("top_dims") or [int(d) for d in get_top_dims(st)]
+            gt_w = labels[st:st + w_size]
+            title = (f"window {st} | GT anomaly: {bool(np.any(gt_w >= 0.5))} | "
+                     f"teacher p={v.get('anomaly_likelihood', 0):.2f} flagged={v['is_anomaly']} | "
+                     f"VLM intervals: {v.get('vlm_intervals', [])}")
+            render_annotated_plot(
+                raw_data, st, st + w_size, dims, gt_w, base_m, base_s,
+                vlm_intervals=v.get("vlm_intervals", []),
+                teacher_mask=v.get("teacher_dense_mask"),
+                title=title,
+                save_path=os.path.join(args.debug_dir, f"debug_{st}_annotated.png"))
+        print(f"Saved {len(shown)} annotated plots to {args.debug_dir}")
 
 if __name__ == "__main__":
     main()
