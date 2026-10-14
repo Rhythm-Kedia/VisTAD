@@ -22,6 +22,9 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for parallel VLM teacher inference (split across GPUs)")
     parser.add_argument("--threshold", type=float, default=None, help="Decision threshold for logit classification (overrides config)")
     parser.add_argument("--mock", action="store_true", help="Generate mock teacher cache without loading 3B model (for fast testing)")
+    parser.add_argument("--display-images", action="store_true",help="Save the full and VLM-view images for the first few windows to --debug-dir")
+    parser.add_argument("--display-count", type=int, default=6, help="How many windows to save when --display-images is set")
+    parser.add_argument("--debug-dir", type=str, default="debug_images",help="Folder for the saved debug images")
     return parser.parse_args()
 
 
@@ -35,6 +38,9 @@ def main():
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, f"{cfg['dataset']['name']}_teacher_cache.pt")
     
+    if args.display_images:
+            os.makedirs(args.debug_dir, exist_ok=True)
+    
     # 1. Load Raw Data
     raw_data, labels = load_dataset_arrays(
         dataset_name=cfg["dataset"]["name"],
@@ -43,8 +49,14 @@ def main():
     )
     
     w_size = cfg["dataset"]["window_size"]
-    base_m = np.mean(raw_data[:cfg["dataset"].get("baseline_steps", 3000)], axis=0)
-    base_s = np.std(raw_data[:cfg["dataset"].get("baseline_steps", 3000)], axis=0) + 1e-6
+    
+    bs = cfg["dataset"].get("baseline_steps", 3000)
+    base_m = np.mean(raw_data[:bs], axis=0)
+    base_s = np.std(raw_data[:bs], axis=0)
+    pos = base_s[base_s > 1e-8]
+    floor = 0.05 * np.median(pos) if len(pos) else 1.0     # 5% of a typical channel's std
+    base_s = np.maximum(base_s, max(floor, 1e-6))
+    print(f"Baseline std: min={base_s.min():.4f} median={np.median(base_s):.4f} max={base_s.max():.4f} (floor={floor:.4f})")
     
     print(f"Loaded {len(raw_data)} steps of {cfg['dataset']['name']}.")
     
@@ -242,10 +254,15 @@ def main():
                     ctx_len=ctx_len
                 )
                 
-                if st in curriculum_starts[:6]:
-                    img.save(f"debug_{st}_full.png")
-                    s = (max_px / (img.width * img.height)) ** 0.5
-                    img.resize((int(img.width * s), int(img.height * s))).save(f"debug_{st}_vlm_view.png")
+                if args.display_images and st in curriculum_starts[:args.display_count]:
+                    img.save(os.path.join(args.debug_dir, f"debug_{st}_full.png"))
+                    s = min(1.0, (max_px / (img.width * img.height)) ** 0.5)
+                    vlm_view = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
+                    vlm_view.save(os.path.join(args.debug_dir, f"debug_{st}_vlm_view.png"))
+                # if st in curriculum_starts[:6]:
+                #     img.save(f"debug_{st}_full.png")
+                #     s = (max_px / (img.width * img.height)) ** 0.5
+                #     img.resize((int(img.width * s), int(img.height * s))).save(f"debug_{st}_vlm_view.png")
                 
                 grounded_prompt = (
                     f"ACTIVE CHANNELS TELEMETRY:\n"
