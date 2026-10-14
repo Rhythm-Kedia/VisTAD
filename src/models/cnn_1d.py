@@ -14,8 +14,9 @@ class CNN1DStudent(nn.Module):
         layers = []
         curr_in = in_channels
         for i in range(num_layers):
+            d = 2 ** i
             layers.extend([
-                nn.Conv1d(curr_in, hidden_dim, kernel_size=5, padding=2, dilation=1),
+                nn.Conv1d(curr_in, hidden_dim, kernel_size=5, padding=2 * d, dilation=d),
                 nn.BatchNorm1d(hidden_dim),
                 nn.GELU(),
                 nn.Dropout(dropout)

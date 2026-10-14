@@ -468,13 +468,13 @@ def main():
                         m[s:e] = 1.0
                 v[key] = torch.from_numpy(m)
 
-        print("\n--- signal mask sweep ---")
-        for z_thr in (2.5, 3.0, 4.0):
-            for gap in (5, 10, 20):
-                for min_len in (5, 10):
-                    add_signal_mask(z_thr, gap, min_len)
-                    print(f"z={z_thr} gap={gap} min_len={min_len}  ", end="")
-                    eval_localization(teacher_cache, labels, audit_windows, w_size, "signal_mask")
+        # print("\n--- signal mask sweep ---")
+        # for z_thr in (2.5, 3.0, 4.0):
+        #     for gap in (5, 10, 20):
+        #         for min_len in (5, 10):
+        #             add_signal_mask(z_thr, gap, min_len)
+        #             print(f"z={z_thr} gap={gap} min_len={min_len}  ", end="")
+        #             eval_localization(teacher_cache, labels, audit_windows, w_size, "signal_mask")
                     
         base = eval_localization(teacher_cache, labels, audit_windows, w_size, "teacher_dense_mask")
         print(f"[{'whole-window':<18}] step P/R/F1 = {base[0]:.3f}/{base[1]:.3f}/{base[2]:.3f}   <- baseline to beat")
