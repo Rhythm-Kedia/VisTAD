@@ -1,4 +1,5 @@
 import os
+import glob
 import numpy as np
 import pandas as pd
 import torch
@@ -148,6 +149,16 @@ def load_dataset_arrays(dataset_name="smd", entity="machine-1-1", data_dir="data
         return test_df.values, test_labels
     else:
         csv_path = os.path.join(target_dir, f"{entity}.csv")
+        if not os.path.exists(csv_path):
+            candidates = glob.glob(os.path.join(target_dir, "*.csv"))
+            for c in candidates:
+                base = os.path.splitext(os.path.basename(c))[0].lower()
+                ent_lower = entity.lower()
+                if base == ent_lower or ent_lower in base or base in ent_lower:
+                    csv_path = c
+                    break
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"Could not locate CSV file for entity '{entity}' in {target_dir}")
         df = pd.read_csv(csv_path)
         labels = df["attack"].values if "attack" in df.columns else np.zeros(len(df))
         data = df.drop(columns=[c for c in ["attack", "label", "timestamp"] if c in df.columns]).values

@@ -17,6 +17,8 @@ from src.trainer import DistillationTrainer
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Student Model with VLM Distillation")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name (smd, swat, msl, gecco) (overrides config)")
+    parser.add_argument("--entity", type=str, default=None, help="Target entity/machine name (default: all cached entities)")
     parser.add_argument("--train_frac", type=float, default=0.5, help="Chronological fraction used for training")
     parser.add_argument("--val_frac", type=float, default=0.1, help="Fraction after train used for validation (checkpoint selection)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (shuffling, init, dropout)")
@@ -74,16 +76,21 @@ def main():
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
     cfg = apply_overrides(cfg, args.overrides)
+    if args.dataset:
+        cfg["dataset"]["name"] = args.dataset
 
-    # No entity in config or CLI: train on every series that has a teacher cache in cache_dir.
-    # (Series are still handled one at a time internally: windows must not span two machines.)
     name = cfg["dataset"]["name"]
     pattern = re.compile(rf"^{re.escape(name)}_(.+)_teacher_cache\.pt$")
-    entities = sorted(m.group(1) for p in glob.glob(os.path.join(cfg["teacher"]["cache_dir"], f"{name}_*_teacher_cache.pt"))
-                      if (m := pattern.match(os.path.basename(p))))
-    if not entities:
+    all_cached_entities = sorted(m.group(1) for p in glob.glob(os.path.join(cfg["teacher"]["cache_dir"], f"{name}_*_teacher_cache.pt"))
+                                 if (m := pattern.match(os.path.basename(p))))
+    if not all_cached_entities:
         raise SystemExit(f"No teacher caches found in '{cfg['teacher']['cache_dir']}' for dataset '{name}'. "
                          f"Run run_teacher_cache.py first.")
+
+    if args.entity and args.entity.lower() != "all":
+        entities = [args.entity]
+    else:
+        entities = all_cached_entities
 
     print("==================================================================")
     print("              IE643 TSAD STUDENT DISTILLATION RUNNER              ")
@@ -105,8 +112,11 @@ def main():
 
     w, stride = cfg["dataset"]["window_size"], cfg["dataset"]["stride"]
 
-    def make_ds(raw, lab, cache):
+    bs_steps = cfg["dataset"].get("baseline_steps", 3000)
+
+    def make_ds(raw, lab, cache, b_mean=None, b_std=None):
         return TimeSeriesDataset(data=raw, labels=lab, window_size=w, stride=stride,
+                                 base_mean=b_mean, base_std=b_std,
                                  filter_strategy=cfg["channel_filter"]["strategy"],
                                  k=cfg["channel_filter"]["k"], teacher_cache=cache)
 
@@ -118,6 +128,9 @@ def main():
             dataset_name=cfg["dataset"]["name"], entity=ent,
             data_dir=cfg["dataset"].get("data_dir", "data"))
         num_channels = raw_data.shape[1]
+        base_m = np.mean(raw_data[:bs_steps], axis=0)
+        base_s = np.std(raw_data[:bs_steps], axis=0) + 1e-6
+
         (tr_x, tr_y), (va_x, va_y), (te_x, te_y) = split_series(raw_data, labels, args.train_frac, args.val_frac)
 
         # Teacher cache is keyed by window start in the full series; only valid for the train slice (starts at 0).
@@ -131,11 +144,12 @@ def main():
             print(f"[{ent}] WARNING: no teacher cache at {cache_path} -> no distillation targets for this entity")
 
         if len(tr_x) >= w:
-            train_sets.append(make_ds(tr_x, tr_y, teacher_cache))
+            train_sets.append(make_ds(tr_x, tr_y, teacher_cache, base_m, base_s))
         if len(va_x) >= w:
-            val_sets.append(make_ds(va_x, va_y, None))
+            val_sets.append(make_ds(va_x, va_y, None, base_m, base_s))
         if len(te_x) >= w:
-            test_sets[ent] = make_ds(te_x, te_y, None)
+            test_sets[ent] = make_ds(te_x, te_y, None, base_m, base_s)
+
 
     if cfg["channel_filter"]["strategy"] != "none" and num_channels > cfg["channel_filter"]["k"]:
         in_channels = cfg["channel_filter"]["k"]
@@ -158,15 +172,19 @@ def main():
         num_layers=cfg["student"].get("num_layers", 3),
         dropout=cfg["student"].get("dropout", 0.1),
         teacher_feat_dim=cfg["student"].get("teacher_feat_dim", 2048))
-    loss_fn = MultiObjectiveKDLoss(w_sup=lw["w_sup"], w_feat=lw["w_feat"], w_resp=lw["w_resp"],
-                                   temperature=cfg["training"].get("temperature", 2.0))
+    loss_fn = MultiObjectiveKDLoss(
+        w_sup=lw["w_sup"], w_feat=lw["w_feat"], w_resp=lw["w_resp"],
+        temperature=cfg["training"].get("temperature", 2.0),
+        decision_threshold=cfg["teacher"].get("decision_threshold", 0.63)
+    )
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=cfg["training"]["lr"],
                                   weight_decay=cfg["training"].get("weight_decay", 1e-4))
+    epochs = cfg["training"]["epochs"]
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     trainer = DistillationTrainer(model=student_model, loss_fn=loss_fn, optimizer=optimizer, device=device,
                                   checkpoint_dir=cfg["training"].get("checkpoint_dir", "checkpoints"))
 
     # 3. Train; select the checkpoint on validation AUROC (not training loss)
-    epochs = cfg["training"]["epochs"]
     tag = entities[0] if len(entities) == 1 else f"pooled{len(entities)}"
     ckpt_name = f"{cfg['dataset']['name']}_{tag}_{cfg['student']['architecture']}_best.pt"
     print(f"Starting distillation training for {epochs} epochs on {device}...")
@@ -174,6 +192,7 @@ def main():
     best_val, saved_path = -1.0, None
     for ep in range(1, epochs + 1):
         avg_loss, comps = trainer.train_epoch(train_loader)
+        scheduler.step()
         val_auc = float("nan")
         if val_loader is not None:
             preds, targets = trainer.predict(val_loader)

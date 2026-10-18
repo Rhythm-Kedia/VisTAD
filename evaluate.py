@@ -13,6 +13,8 @@ from src.metrics import compute_point_metrics, compute_affiliation_metrics, comp
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate Trained Student on Continuous Benchmark")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name (smd, swat, msl, gecco) (overrides config)")
+    parser.add_argument("--entity", type=str, default=None, help="Specific entity to evaluate (overrides config)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint file")
     parser.add_argument("--stride", type=int, default=1, help="Evaluation sliding stride (default 1 for continuous)")
     return parser.parse_args()
@@ -26,11 +28,16 @@ def main():
     device = cfg["training"].get("device", "cuda") if torch.cuda.is_available() else "cpu"
     
     # 1. Load Data
+    dataset_name = args.dataset if args.dataset else cfg["dataset"]["name"]
+    entity = args.entity if args.entity else cfg["dataset"].get("entity", "machine-1-1")
     raw_data, labels = load_dataset_arrays(
-        dataset_name=cfg["dataset"]["name"],
-        entity=cfg["dataset"].get("entity", "machine-1-1"),
+        dataset_name=dataset_name,
+        entity=entity,
         data_dir=cfg["dataset"].get("data_dir", "data")
     )
+    bs_steps = cfg["dataset"].get("baseline_steps", 3000)
+    base_m = np.mean(raw_data[:bs_steps], axis=0)
+    base_s = np.std(raw_data[:bs_steps], axis=0) + 1e-6
     
     num_channels = raw_data.shape[1]
     in_channels = cfg["channel_filter"]["k"] if cfg["channel_filter"]["strategy"] != "none" and num_channels > cfg["channel_filter"]["k"] else num_channels
@@ -60,9 +67,12 @@ def main():
         labels=labels,
         window_size=cfg["dataset"]["window_size"],
         stride=args.stride,
+        base_mean=base_m,
+        base_std=base_s,
         filter_strategy=cfg["channel_filter"]["strategy"],
         k=cfg["channel_filter"]["k"]
     )
+
     
     eval_loader = DataLoader(eval_dataset, batch_size=128, shuffle=False)
     

@@ -109,7 +109,9 @@ def compute_dynamic_pot_threshold(scores, q=1e-3, level=0.98):
         threshold = init_threshold - sigma * np.log(q * n / n_peaks)
         
     threshold = float(threshold)
-    if threshold >= max_score or np.isnan(threshold) or threshold <= 0:
-        threshold = init_threshold
+    p99 = float(np.quantile(scores, 0.99))
+    if threshold >= max_score or np.isnan(threshold) or threshold <= 0 or threshold > p99:
+        threshold = init_threshold if init_threshold <= p99 else p99
         
     return threshold
+

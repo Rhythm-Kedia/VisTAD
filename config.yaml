@@ -37,8 +37,8 @@ training:
   # Setting any loss weight to 0.0 disables that objective (clean ablations)
   loss_weights:
     w_sup: 1.0              # ground truth anchor loss (BCE on continuous density)
-    w_feat: 0.5             # teacher latent feature alignment (MSE)
-    w_resp: 1.0             # teacher soft likelihood response matching (KL-Div)
+    w_feat: 0.1             # teacher latent feature alignment (Cosine similarity)
+    w_resp: 1.0             # calibrated teacher soft response matching
 
 # 5. Teacher Offline Caching
 teacher:

@@ -4,15 +4,22 @@ import torch.nn.functional as F
 
 
 class CNN1DStudent(nn.Module):
-    """Temporal 1D-CNN Student Model for TSAD."""
+    """Temporal 1D-CNN Student Model for TSAD.
     
-    def __init__(self, in_channels, hidden_dim=128, num_layers=3, dropout=0.1, teacher_feat_dim=2048):
+    Supports Channel-Independent (CI) temporal modeling: processes each channel
+    through a shared 1D temporal backbone, enabling zero-shot cross-entity
+    and cross-dataset generalization with permutation invariance.
+    """
+    
+    def __init__(self, in_channels=6, hidden_dim=128, num_layers=3, dropout=0.1,
+                 teacher_feat_dim=2048, channel_independent=True):
         super().__init__()
         self.in_channels = in_channels
         self.hidden_dim = hidden_dim
+        self.channel_independent = channel_independent
         
+        curr_in = 1 if channel_independent else in_channels
         layers = []
-        curr_in = in_channels
         for i in range(num_layers):
             d = 2 ** i
             layers.extend([
@@ -33,18 +40,47 @@ class CNN1DStudent(nn.Module):
         )
         
     def forward(self, x):
-        h = self.backbone(x)
-        dense_logits = self.dense_head(h).squeeze(1)
-        dense_probs = torch.sigmoid(dense_logits)
-        
-        k_pool = min(10, dense_probs.shape[1])
-        score_scalar = torch.topk(dense_probs, k=k_pool, dim=1)[0].mean(dim=1)
-        
-        h_pooled = torch.mean(h, dim=-1)
-        proj_feat = self.feat_projector(h_pooled)
-        
-        return {
-            "score_scalar": score_scalar,
-            "logits_dense": dense_probs,
-            "features": proj_feat
-        }
+        if self.channel_independent:
+            B, K, L = x.shape
+            x_ci = x.reshape(B * K, 1, L)
+            h_ci = self.backbone(x_ci)
+            dense_ci = torch.sigmoid(self.dense_head(h_ci)).squeeze(1)
+            dense_per_chan = dense_ci.reshape(B, K, L)
+            
+            # Permutation-invariant aggregation across channels: max anomaly probability
+            dense_probs = torch.max(dense_per_chan, dim=1)[0]
+            
+            # Multi-scale anomaly pooling (captures both transient spikes and sustained shifts)
+            max_p = torch.max(dense_probs, dim=1)[0]
+            k_pool = min(10, L)
+            top_p = torch.topk(dense_probs, k=k_pool, dim=1)[0].mean(dim=1)
+            score_scalar = 0.6 * max_p + 0.4 * top_p
+            
+            # Feature representation pooled over time and channels
+            h_pooled = torch.mean(h_ci.reshape(B, K, -1, L).mean(dim=1), dim=-1)
+            proj_feat = self.feat_projector(h_pooled)
+            
+            return {
+                "score_scalar": score_scalar,
+                "logits_dense": dense_probs,
+                "features": proj_feat
+            }
+        else:
+            h = self.backbone(x)
+            dense_logits = self.dense_head(h).squeeze(1)
+            dense_probs = torch.sigmoid(dense_logits)
+            
+            max_p = torch.max(dense_probs, dim=1)[0]
+            k_pool = min(10, dense_probs.shape[1])
+            top_p = torch.topk(dense_probs, k=k_pool, dim=1)[0].mean(dim=1)
+            score_scalar = 0.6 * max_p + 0.4 * top_p
+            
+            h_pooled = torch.mean(h, dim=-1)
+            proj_feat = self.feat_projector(h_pooled)
+            
+            return {
+                "score_scalar": score_scalar,
+                "logits_dense": dense_probs,
+                "features": proj_feat
+            }
+

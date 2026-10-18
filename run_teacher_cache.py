@@ -108,6 +108,7 @@ def report_metrics(y_true, scores, threshold, tag, rule_scores=None, log_path=No
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Frozen VLM Teacher & Cache Distillation Guidance")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name (smd, swat, msl, gecco) (overrides config)")
     parser.add_argument("--entity", type=str, default=None, help="Entity/machine name (overrides config)")
     parser.add_argument("--num_windows", type=int, default=80, help="Number of curriculum windows to cache")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for parallel VLM teacher inference (split across GPUs)")
@@ -127,10 +128,12 @@ def main():
         cfg = yaml.safe_load(f)
 
     # CLI overrides config
+    if args.dataset:
+        cfg["dataset"]["name"] = args.dataset
     if args.entity:
         cfg["dataset"]["entity"] = args.entity
     entity = cfg["dataset"].get("entity", "machine-1-1")
-    print(f"Entity: {entity}")
+    print(f"Dataset: {cfg['dataset']['name']}, Entity: {entity}")
 
     cache_dir = cfg["teacher"].get("cache_dir", "cache")
     os.makedirs(cache_dir, exist_ok=True)

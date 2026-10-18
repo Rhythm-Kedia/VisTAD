@@ -66,8 +66,11 @@ class TimesNetStudent(nn.Module):
         dense_logits = self.dense_head(h_final).squeeze(1)
         dense_probs = torch.sigmoid(dense_logits)
         
+        # Multi-scale anomaly pooling (captures both transient spikes and sustained shifts)
+        max_p = torch.max(dense_probs, dim=1)[0]
         k_pool = min(10, dense_probs.shape[1])
-        score_scalar = torch.topk(dense_probs, k=k_pool, dim=1)[0].mean(dim=1)
+        top_p = torch.topk(dense_probs, k=k_pool, dim=1)[0].mean(dim=1)
+        score_scalar = 0.6 * max_p + 0.4 * top_p
         
         h_pooled = torch.mean(h_final, dim=-1)
         proj_feat = self.feat_projector(h_pooled)
