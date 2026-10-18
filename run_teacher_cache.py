@@ -295,11 +295,20 @@ def main():
         # token budget: cap visual tokens to ~252 per image (down from 1,008) to slash GPU compute by ~4x
         min_px = cfg["teacher"].get("min_pixels", 128 * 28 * 28)
         max_px = cfg["teacher"].get("max_pixels", 256 * 28 * 28)
-        processor = AutoProcessor.from_pretrained(
-            model_id,
-            min_pixels=min_px,
-            max_pixels=max_px
-        )
+        try:
+            processor = AutoProcessor.from_pretrained(
+                model_id,
+                min_pixels=min_px,
+                max_pixels=max_px
+            )
+        except Exception as proc_err:
+            fallback_hub_id = cfg["teacher"].get("model_id", "Qwen/Qwen2.5-VL-3B-Instruct")
+            print(f"[PROCESSOR] Local processor config failed ({proc_err}). Falling back to Hub processor: {fallback_hub_id}")
+            processor = AutoProcessor.from_pretrained(
+                fallback_hub_id,
+                min_pixels=min_px,
+                max_pixels=max_px
+            )
         processor.tokenizer.padding_side = "left"
         
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(

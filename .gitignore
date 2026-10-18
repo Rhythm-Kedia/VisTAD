@@ -22,3 +22,6 @@ venv/
 *.log
 *.ipynb
 !vistad_kaggle_pipeline.ipynb
+report/
+log*
+Notes/
