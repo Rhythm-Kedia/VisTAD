@@ -18,8 +18,13 @@ import datetime
 from sklearn.metrics import (roc_auc_score, average_precision_score,
                              precision_recall_curve, matthews_corrcoef)
 
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-from qwen_vl_utils import process_vision_info
+try:
+    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+    from qwen_vl_utils import process_vision_info
+except ImportError:
+    Qwen2_5_VLForConditionalGeneration = None
+    AutoProcessor = None
+    process_vision_info = None
 
 
 def eval_localization(cache, labels, starts, w_size, key):
