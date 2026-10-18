@@ -7,6 +7,10 @@ checkpoints/
 temp_*.png
 
 data/
+data_repository/
+OneDrive_*/
+*.zip
+.DS_Store
 issues/
 tests/
 
@@ -17,3 +21,4 @@ __pycache__/
 venv/
 *.log
 *.ipynb
+!vistad_kaggle_pipeline.ipynb
