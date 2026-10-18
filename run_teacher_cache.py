@@ -115,6 +115,7 @@ def parse_args():
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--dataset", type=str, default=None, help="Dataset name (smd, swat, msl, gecco) (overrides config)")
     parser.add_argument("--entity", type=str, default=None, help="Entity/machine name (overrides config)")
+    parser.add_argument("--model_path", type=str, default=None, help="Local directory path to pre-attached Qwen2.5-VL model weights (overrides config)")
     parser.add_argument("--num_windows", type=int, default=80, help="Number of curriculum windows to cache")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for parallel VLM teacher inference (split across GPUs)")
     parser.add_argument("--threshold", type=float, default=None, help="Decision threshold for logit classification (overrides config)")
@@ -271,9 +272,26 @@ def main():
             device_map = "cpu"
             primary_device = "cpu"
 
-        print(f"Loading {cfg['teacher']['model_id']} with token budget capping and left-padding...")
-        
+        candidate_paths = [
+            args.model_path,
+            cfg["teacher"].get("model_path"),
+            "/kaggle/input/models/qwen-lm/qwen2.5-vl/transformers/3b-instruct/2",
+            "/kaggle/input/qwen2.5-vl/transformers/3b-instruct/2",
+        ]
+        if os.path.exists("/kaggle/input"):
+            for root, dirs, files in os.walk("/kaggle/input"):
+                if ("config.json" in files or "model.safetensors.index.json" in files) and "qwen" in root.lower() and "vl" in root.lower():
+                    candidate_paths.append(root)
+
         model_id = cfg["teacher"]["model_id"]
+        for p in candidate_paths:
+            if p and os.path.exists(p) and (os.path.exists(os.path.join(p, "config.json")) or os.path.exists(os.path.join(p, "model.safetensors.index.json"))):
+                print(f"[MODEL] Detected local pre-attached VLM model at: {p}")
+                model_id = p
+                break
+
+        print(f"Loading {model_id} with token budget capping and left-padding...")
+        
         # token budget: cap visual tokens to ~252 per image (down from 1,008) to slash GPU compute by ~4x
         min_px = cfg["teacher"].get("min_pixels", 128 * 28 * 28)
         max_px = cfg["teacher"].get("max_pixels", 256 * 28 * 28)
