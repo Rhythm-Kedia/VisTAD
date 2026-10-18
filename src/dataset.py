@@ -4,6 +4,10 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+def split_series(raw, labels, train_frac=0.5, val_frac=0.1):
+    n = len(raw)
+    a, b = int(n * train_frac), int(n * (train_frac + val_frac))
+    return (raw[:a], labels[:a]), (raw[a:b], labels[a:b]), (raw[b:], labels[b:])
 
 def select_top_k_channels(window_data, base_mean=None, base_std=None, ctx_data=None, strategy="median_shift", k=6):
     """Filters channels to Top-K avoiding visual clutter and dead-channel division explosions."""

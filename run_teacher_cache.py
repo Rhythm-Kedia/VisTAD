@@ -8,9 +8,102 @@ import torch
 
 from src.dataset import load_dataset_arrays, select_top_k_channels
 from src.teacher_vlm import (
-    render_dual_horizon_image, parse_vlm_json_output, SYSTEM_PROMPT,
-    extract_telemetry_metrics, extract_logit_scores_and_features
+    render_dual_horizon_image, render_annotated_plot, SYSTEM_PROMPT,
+    extract_telemetry_metrics, extract_logit_scores_and_features,
+    signal_intervals
 )
+
+import csv
+import datetime
+from sklearn.metrics import (roc_auc_score, average_precision_score,
+                             precision_recall_curve, matthews_corrcoef)
+
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from qwen_vl_utils import process_vision_info
+
+
+def eval_localization(cache, labels, starts, w_size, key):
+    G, P, F, ious, hits, n_anom = [], [], [], [], 0, 0
+    for st in starts:
+        if st not in cache:
+            continue
+        g = labels[st:st + w_size] >= 0.5
+        p = cache[st][key].numpy() > 0 if key in cache[st] else np.zeros(w_size, dtype=bool)   # unflagged = no mask
+        G.append(g); P.append(p)
+        F.append(np.full(w_size, bool(cache[st]["is_anomaly"])))          # whole-window baseline
+        if g.any():
+            n_anom += 1; hits += int((g & p).any())
+            u = (g | p).sum(); ious.append((g & p).sum() / u if u else 0.0)
+    g, p, f = np.concatenate(G), np.concatenate(P), np.concatenate(F)
+
+    def prf(x):
+        tp = (g & x).sum(); fp = (~g & x).sum(); fn = (g & ~x).sum()
+        pr = tp / max(1, tp + fp); rc = tp / max(1, tp + fn)
+        return pr, rc, 2 * pr * rc / max(1e-9, pr + rc)
+
+    a, b = prf(p), prf(f)
+    print(f"[{key:<18}] step P/R/F1 = {a[0]:.3f}/{a[1]:.3f}/{a[2]:.3f} | hit rate {hits / max(1, n_anom):.1%} | "
+          f"mean IoU {np.mean(ious) if ious else float('nan'):.3f}")
+    return b
+
+def report_metrics(y_true, scores, threshold, tag, rule_scores=None, log_path=None, extra=None):
+    y_true = np.asarray(y_true).astype(int)
+    scores = np.asarray(scores, dtype=float)
+    pred = (scores >= threshold).astype(int)
+
+    tp = int(((pred == 1) & (y_true == 1)).sum()); fp = int(((pred == 1) & (y_true == 0)).sum())
+    tn = int(((pred == 0) & (y_true == 0)).sum()); fn = int(((pred == 0) & (y_true == 1)).sum())
+    n = tp + fp + tn + fn
+    prec = tp / max(1, tp + fp); rec = tp / max(1, tp + fn); spec = tn / max(1, tn + fp)
+    f1 = 2 * prec * rec / max(1e-9, prec + rec)
+    acc = (tp + tn) / max(1, n); bal_acc = (rec + spec) / 2
+    mcc = matthews_corrcoef(y_true, pred) if len(set(pred)) > 1 and len(set(y_true)) > 1 else float("nan")
+    prev = y_true.mean() if n else float("nan")
+    yes_f1 = 2 * prev / (1 + prev) if prev > 0 else float("nan")      # always-YES baseline: precision=prev, recall=1
+
+    two_class = len(set(y_true)) == 2
+    auroc = roc_auc_score(y_true, scores) if two_class else float("nan")
+    auprc = average_precision_score(y_true, scores) if two_class else float("nan")
+    best_f1, best_thr = float("nan"), float("nan")
+    if two_class:
+        p, r, t = precision_recall_curve(y_true, scores)
+        f = 2 * p[:-1] * r[:-1] / np.maximum(p[:-1] + r[:-1], 1e-9)
+        if len(f):
+            best_f1, best_thr = float(f.max()), float(t[f.argmax()])
+
+    print("\n" + "=" * 70)
+    print(f"  RUN SUMMARY  [{tag}]  windows={n}  positives={int(y_true.sum())} ({prev:.1%})")
+    print("=" * 70)
+    print(f"Threshold {threshold:.2f}:  TP={tp}  FP={fp}  TN={tn}  FN={fn}")
+    print(f"  Precision {prec:.3f} | Recall {rec:.3f} | F1 {f1:.3f} | Specificity {spec:.3f}")
+    print(f"  Accuracy {acc:.3f} | Balanced acc {bal_acc:.3f} | MCC {mcc:.3f}")
+    print(f"Threshold-free:  AUROC {auroc:.3f} | AUPRC {auprc:.3f} (chance = {prev:.3f})")
+    print(f"  Best-F1 threshold {best_thr:.3f} -> F1 {best_f1:.3f}  (tuned on this data, optimistic)")
+    print(f"Baseline 'always YES':  F1 {yes_f1:.3f}  <- your F1 must clearly beat this")
+    rule_aucs = {}
+    if rule_scores and two_class:
+        for name, vals in rule_scores.items():
+            vals = np.asarray(vals, dtype=float)
+            if not np.isnan(vals).any():
+                rule_aucs[name] = roc_auc_score(y_true, vals)
+                print(f"Rule '{name}' AUROC: {rule_aucs[name]:.3f}")
+    print("=" * 70 + "\n")
+
+    if log_path:
+        row = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "tag": tag,
+               "n": n, "pos_rate": round(prev, 4), "thr": threshold, "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+               "precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4),
+               "specificity": round(spec, 4), "bal_acc": round(bal_acc, 4), "mcc": round(mcc, 4),
+               "auroc": round(auroc, 4), "auprc": round(auprc, 4), "always_yes_f1": round(yes_f1, 4),
+               "best_f1": round(best_f1, 4), "best_thr": round(best_thr, 4)}
+        row.update({f"auroc_{k}": round(v, 4) for k, v in rule_aucs.items()})
+        if extra: row.update(extra)
+        new = not os.path.exists(log_path)
+        with open(log_path, "a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(row.keys()))
+            if new: w.writeheader()
+            w.writerow(row)
+        print(f"Appended to {log_path}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Frozen VLM Teacher & Cache Distillation Guidance")
@@ -20,27 +113,48 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for parallel VLM teacher inference (split across GPUs)")
     parser.add_argument("--threshold", type=float, default=None, help="Decision threshold for logit classification (overrides config)")
     parser.add_argument("--mock", action="store_true", help="Generate mock teacher cache without loading 3B model (for fast testing)")
+    parser.add_argument("--display-images", action="store_true",help="Save the full and VLM-view images for the first few windows to --debug-dir")
+    parser.add_argument("--display-count", type=int, default=6, help="How many windows to save when --display-images is set")
+    parser.add_argument("--debug-dir", type=str, default="debug_images",help="Folder for the saved debug images")
     return parser.parse_args()
 
+
+
 def main():
+    
     args = parse_args()
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
-        
+
+    # CLI overrides config
+    if args.entity:
+        cfg["dataset"]["entity"] = args.entity
+    entity = cfg["dataset"].get("entity", "machine-1-1")
+    print(f"Entity: {entity}")
+
     cache_dir = cfg["teacher"].get("cache_dir", "cache")
     os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f"{cfg['dataset']['name']}_teacher_cache.pt")
-    
-    # 1. Load Raw Data
+    cache_file = os.path.join(cache_dir, f"{cfg['dataset']['name']}_{entity}_teacher_cache.pt")
+
+    debug_dir = os.path.join(args.debug_dir, entity)
+    if args.display_images:
+        os.makedirs(debug_dir, exist_ok=True)
+
     raw_data, labels = load_dataset_arrays(
         dataset_name=cfg["dataset"]["name"],
-        entity=cfg["dataset"].get("entity", "machine-1-1"),
+        entity=entity,
         data_dir=cfg["dataset"].get("data_dir", "data")
     )
     
     w_size = cfg["dataset"]["window_size"]
-    base_m = np.mean(raw_data[:cfg["dataset"].get("baseline_steps", 3000)], axis=0)
-    base_s = np.std(raw_data[:cfg["dataset"].get("baseline_steps", 3000)], axis=0) + 1e-6
+    
+    bs = cfg["dataset"].get("baseline_steps", 3000)
+    base_m = np.mean(raw_data[:bs], axis=0)
+    base_s = np.std(raw_data[:bs], axis=0)
+    pos = base_s[base_s > 1e-8]
+    floor = 0.05 * np.median(pos) if len(pos) else 1.0     # 5% of a typical channel's std
+    base_s = np.maximum(base_s, max(floor, 1e-6))
+    print(f"Baseline std: min={base_s.min():.4f} median={np.median(base_s):.4f} max={base_s.max():.4f} (floor={floor:.4f})")
     
     print(f"Loaded {len(raw_data)} steps of {cfg['dataset']['name']}.")
     
@@ -81,12 +195,24 @@ def main():
     
     print(f"Selected {len(curriculum_starts)} balanced curriculum windows (interleaved: {len(anom_starts)} anomaly, {len(normal_anchors)} normal).")
     
+    ctx_len = cfg["teacher"].get("macro_context_len", 800)
+
+    def get_top_dims(st):
+                end = st + w_size
+                ctx_slice = raw_data[max(0, st - ctx_len):st]
+                return select_top_k_channels(
+                    raw_data[st:end], base_mean=base_m, base_std=base_s, ctx_data=ctx_slice,
+                    strategy=cfg["channel_filter"].get("strategy", "median_shift"),
+                    k=cfg["channel_filter"].get("k", 6),
+                )
+                
     if os.path.exists(cache_file):
         print(f"Found existing teacher cache at {cache_file}. Loading to resume...")
         teacher_cache = torch.load(cache_file)
         print(f"Loaded {len(teacher_cache)} existing cached windows.")
     else:
         teacher_cache = {}
+    
     
     if args.mock:
         print("Running in MOCK mode: Simulating teacher outputs for pipeline validation...")
@@ -115,6 +241,7 @@ def main():
                 "teacher_dense_mask": torch.tensor(dense_mask, dtype=torch.float32)
             }
             torch.save(teacher_cache, cache_file)
+            
     else:
         # Check GPU Availability and Print Diagnostics
         has_cuda = torch.cuda.is_available()
@@ -137,8 +264,6 @@ def main():
             primary_device = "cpu"
 
         print(f"Loading {cfg['teacher']['model_id']} with token budget capping and left-padding...")
-        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-        from qwen_vl_utils import process_vision_info
         
         model_id = cfg["teacher"]["model_id"]
         # token budget: cap visual tokens to ~252 per image (down from 1,008) to slash GPU compute by ~4x
@@ -191,7 +316,6 @@ def main():
                 logits = model_ref.lm_head(last_tok).squeeze(1).float().cpu()
             return logits, z_T
         
-        ctx_len = cfg["teacher"].get("macro_context_len", 800)
         decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
         pending_starts = [st for st in curriculum_starts if st not in teacher_cache]
         print(f"Curriculum Queue: {len(pending_starts)} windows to process (batch_size={args.batch_size}, threshold={decision_threshold}).")
@@ -235,6 +359,17 @@ def main():
                     base_mean=base_m, base_std=base_s,
                     ctx_len=ctx_len
                 )
+                
+                if args.display_images and st in curriculum_starts[:args.display_count]:
+                    img.save(os.path.join(debug_dir, f"debug_{st}_full.png"))
+                    s = min(1.0, (max_px / (img.width * img.height)) ** 0.5)
+                    vlm_view = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
+                    vlm_view.save(os.path.join(debug_dir, f"debug_{st}_vlm_view.png"))
+                        
+                # if st in curriculum_starts[:6]:
+                #     img.save(f"debug_{st}_full.png")
+                #     s = (max_px / (img.width * img.height)) ** 0.5
+                #     img.resize((int(img.width * s), int(img.height * s))).save(f"debug_{st}_vlm_view.png")
                 
                 grounded_prompt = (
                     f"ACTIVE CHANNELS TELEMETRY:\n"
@@ -283,7 +418,9 @@ def main():
                 last_logits=last_logits, z_T_batch=z_T_batch
             )
             
+                
             for i_b, st in enumerate(batch_starts):
+                batch_results[i_b]["top_dims"] = [int(d) for d in batch_top_dims[i_b]]
                 teacher_cache[st] = batch_results[i_b]
                 
             # persist incrementally after each batch
@@ -302,44 +439,62 @@ def main():
     print("\n" + "=" * 70)
     print("                 TEACHER ACCURACY & QUALITY AUDIT                 ")
     print("=" * 70)
-    tp, fp, tn, fn = 0, 0, 0, 0
+    
+    
+    decision_threshold = args.threshold if args.threshold is not None else cfg["teacher"].get("decision_threshold", 0.63)
     audit_windows = [st for st in curriculum_starts if st in teacher_cache]
+    y_true, y_score, y_peak, y_sus = [], [], [], []
     for st in audit_windows:
         v = teacher_cache[st]
-        gt_window = labels[st : st + w_size]
-        is_gt_anom = bool(np.any(gt_window >= 0.5))
-        pred_anom = bool(v.get("is_anomaly", False))
-        score = v.get("anomaly_likelihood", 0.0)
-        conf = v.get("anomaly_confidence", 1)
+        y_true.append(int(np.any(labels[st: st + w_size] >= 0.5)))
+        y_score.append(float(v.get("anomaly_likelihood", 0.0)))
+        y_peak.append(v.get("peak_z", np.nan))
+        y_sus.append(v.get("max_sustained", np.nan))
+
+    if y_true:
+        report_metrics(
+            y_true, y_score, decision_threshold,
+            tag=f"{cfg['dataset']['name']}/{cfg['dataset'].get('entity', '')}",
+            rule_scores={"peak_z": y_peak, "max_sustained": y_sus},
+        )
         
-        if is_gt_anom and pred_anom:
-            tp += 1
-            tag = "TP [Hit]"
-        elif not is_gt_anom and not pred_anom:
-            tn += 1
-            tag = "TN [Clean]"
-        elif not is_gt_anom and pred_anom:
-            fp += 1
-            tag = "FP [False Alarm]"
-        else:
-            fn += 1
-            tag = "FN [Missed]"
-            
-        print(f"Window @ {st:05d} | GT: {'ANOM' if is_gt_anom else 'NORM':4s} | Pred: {'ANOM' if pred_anom else 'NORM':4s} (Score={score:.2f}, Conf={conf}) | {tag}")
+        def add_signal_mask(z_thr, gap, min_len, key="signal_mask"):
+            for st in audit_windows:
+                v = teacher_cache[st]
+                m = np.zeros(w_size, dtype=np.float32)
+                if v["is_anomaly"]:
+                    dims = v.get("top_dims") or [int(d) for d in get_top_dims(st)]
+                    for s, e in signal_intervals(raw_data[st:st + w_size], base_m, base_s, dims, z_thr, gap, min_len):
+                        m[s:e] = 1.0
+                v[key] = torch.from_numpy(m)
 
-    total = tp + fp + tn + fn
-    acc = (tp + tn) / max(1, total)
-    prec = tp / max(1, tp + fp)
-    rec = tp / max(1, tp + fn)
-    f1 = 2 * prec * rec / max(1e-6, prec + rec)
-
-    print("-" * 70)
-    print(f"Summary: TP={tp}, FP={fp}, TN={tn}, FN={fn} | Total Windows: {total}")
-    print(f"Teacher Accuracy:  {acc:.1%}")
-    print(f"Teacher Precision: {prec:.1%}")
-    print(f"Teacher Recall:    {rec:.1%}")
-    print(f"Teacher F1-Score:  {f1:.3f}")
-    print("=" * 70 + "\n")
+        # print("\n--- signal mask sweep ---")
+        # for z_thr in (2.5, 3.0, 4.0):
+        #     for gap in (5, 10, 20):
+        #         for min_len in (5, 10):
+        #             add_signal_mask(z_thr, gap, min_len)
+        #             print(f"z={z_thr} gap={gap} min_len={min_len}  ", end="")
+        #             eval_localization(teacher_cache, labels, audit_windows, w_size, "signal_mask")
+                    
+        base = eval_localization(teacher_cache, labels, audit_windows, w_size, "teacher_dense_mask")
+        print(f"[{'whole-window':<18}] step P/R/F1 = {base[0]:.3f}/{base[1]:.3f}/{base[2]:.3f}   <- baseline to beat")
+    else:
+        print("No windows to audit.")
+        
+    if args.display_images:
+        shown = [st for st in curriculum_starts[:args.display_count] if st in teacher_cache]
+        for st in shown:
+            v = teacher_cache[st]
+            dims = v.get("top_dims") or [int(d) for d in get_top_dims(st)]
+            gt_w = labels[st:st + w_size]
+            title = (f"window {st} | GT anomaly: {bool(np.any(gt_w >= 0.5))} | "
+                     f"teacher p={v.get('anomaly_likelihood', 0):.2f} flagged={v['is_anomaly']}")
+            render_annotated_plot(
+                raw_data, st, st + w_size, dims, gt_w, base_m, base_s,
+                teacher_mask=v.get("teacher_dense_mask"),
+                title=title,
+                save_path=os.path.join(debug_dir, f"debug_{st}_annotated.png"))
+        # print(f"Saved {len(shown)} annotated plots to {args.debug_dir}")
 
 if __name__ == "__main__":
     main()

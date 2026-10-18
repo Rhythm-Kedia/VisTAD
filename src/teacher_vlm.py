@@ -14,6 +14,7 @@ SYSTEM_PROMPT = (
     "You are inspecting a 2-panel line plot of z-normalized telemetry (red dashed lines = nominal ±3σ control boundaries):\n"
     "- PANEL 1 (TOP): Prior historical context (baseline operating state).\n"
     "- PANEL 2 (BOTTOM): Target window under inspection (relative steps 0 to 200).\n\n"
+    "- The y-axis is linear within ±3σ and logarithmic beyond, so tall spikes are compressed.\n"
     "DIAGNOSTIC PRINCIPLES:\n"
     "1. NORMAL BEHAVIOR:\n"
     "   - Signals stay inside nominal baseline (inside ±3σ).\n"
@@ -24,6 +25,18 @@ SYSTEM_PROMPT = (
     "Answer strictly with 'YES' if Panel 2 displays a genuine operational anomaly, or 'NO' if it represents normal baseline operations."
 )
 
+def signal_intervals(w_slice, base_m, base_s, dims, z_thr=3.0, gap=10, min_len=8):
+    z = np.abs((w_slice[:, dims] - base_m[dims]) / base_s[dims])
+    idx = np.flatnonzero((z >= z_thr).any(axis=1))
+    if len(idx) == 0:
+        return []
+    iv = [[int(idx[0]), int(idx[0]) + 1]]
+    for i in idx[1:]:
+        if i - iv[-1][1] <= gap:
+            iv[-1][1] = int(i) + 1
+        else:
+            iv.append([int(i), int(i) + 1])
+    return [[s, e] for s, e in iv if e - s >= min_len]
 
 def extract_telemetry_metrics(w_slice, base_m, base_s, top_dims):
     """Computes peak z-score, maximum consecutive steps exceeding 3σ, and mean deviation."""
@@ -43,63 +56,58 @@ def extract_telemetry_metrics(w_slice, base_m, base_s, top_dims):
     max_sustained = max(runs) if runs else 0
     return peak_z, max_sustained, mean_z
 
-
-def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, base_std=None, save_path=None, ctx_len=800):
-    """Renders dual-horizon canvas where Panel 1 is strictly prior history and curves are uncluttered."""
+def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, base_std=None,
+                              save_path=None, ctx_len=800, px=(588, 336), dpi=100, tick_step=50):
+    """Dual-panel plot sized to the VLM pixel budget (588x336 <= 256*28*28).
+    Shared symlog y-axis: linear inside +-3 sigma, logarithmic beyond, so spikes of 25 and 1200 sigma both fit."""
     ctx_start = max(0, start_idx - ctx_len)
-    # strictly prior history up to start_idx to prevent target window leakage into the reference panel
     ctx_data = data[ctx_start:start_idx]
     local_data = data[start_idx:end_idx]
     w_len = len(local_data)
-    
-    # z-normalize per-channel using baseline statistics to highlight anomalies
-    if base_mean is not None:
-        mu = base_mean[dims]
-    else:
-        mu = np.mean(ctx_data[:, dims], axis=0)
 
-    if base_std is not None:
-        sigma = base_std[dims]
-    else:
-        sigma = np.std(ctx_data[:, dims], axis=0)
-
+    mu = base_mean[dims] if base_mean is not None else np.mean(ctx_data[:, dims], axis=0)
+    sigma = base_std[dims] if base_std is not None else np.std(ctx_data[:, dims], axis=0)
     sigma = np.where(sigma < 1e-4, 1.0, sigma)
     ctx_plot = (ctx_data[:, dims] - mu) / sigma
     local_plot = (local_data[:, dims] - mu) / sigma
 
-    fig, (ax_macro, ax_micro) = plt.subplots(2, 1, figsize=(9.0, 5.2), dpi=100, gridspec_kw={"height_ratios": [1, 1.3]})
-    colors = plt.cm.tab10(np.linspace(0, 1, max(len(dims), 1)))
-    
-    # top panel: strictly prior historical context (reference baseline)
-    for i, d in enumerate(dims):
-        ax_macro.plot(range(len(ctx_data)), ctx_plot[:, i], label=f"Dim {d}", color=colors[i], linewidth=0.9, alpha=0.85)
-    ax_macro.set_xlim(0, max(1, len(ctx_data)))
-    ax_macro.set_title("PANEL 1: PRIOR HISTORICAL CONTEXT (Past 800 Steps BEFORE Target Window - Baseline)", fontsize=9, fontweight="bold", color="navy")
-    ax_macro.grid(True, linestyle=":", alpha=0.5)
-    ax_macro.set_ylabel("Z-Score (std dev)", fontsize=8)
-    ax_macro.set_xlabel("Historical Time Steps Prior to Target Window", fontsize=8)
-    ax_macro.legend(loc="upper right", ncol=min(6, len(dims)), fontsize=7)
-    
-    # bottom panel: candidate target window under inspection
-    for i, d in enumerate(dims):
-        ax_micro.plot(range(w_len), local_plot[:, i], label=f"Dim {d}", color=colors[i], linewidth=1.3)
-    ax_micro.set_xlim(0, w_len)
-    ax_micro.xaxis.set_major_locator(MultipleLocator(50))
-    ax_micro.xaxis.set_minor_locator(MultipleLocator(10))
-    ax_micro.grid(True, which="major", linestyle="--", alpha=0.6)
-    ax_micro.grid(True, which="minor", linestyle=":", alpha=0.3)
-    ax_micro.set_title(f"PANEL 2: CANDIDATE TARGET WINDOW UNDER INSPECTION (Steps 0 to {w_len})", fontsize=9, fontweight="bold", color="darkgreen")
-    ax_micro.set_xlabel(f"Relative Step Index within Target Window (0 - {w_len})", fontsize=8)
-    ax_micro.set_ylabel("Z-Score (std dev)", fontsize=8)
+    peak = max(np.abs(ctx_plot).max(initial=0.0), np.abs(local_plot).max(initial=0.0))
+    ymax = float(max(10.0, 1.1 * peak))
 
-    # visual anomaly threshold anchors (0 mean and ±3 sigma lines)
-    for ax in (ax_macro, ax_micro):
-        ax.axhline(0.0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
-        ax.axhline(3.0, color="crimson", linestyle="--", linewidth=0.8, alpha=0.6)
-        ax.axhline(-3.0, color="crimson", linestyle="--", linewidth=0.8, alpha=0.6)
-        y_min, y_max = ax.get_ylim()
-        ax.set_ylim(min(y_min, -4.0), max(y_max, 4.0))
+    fig, (ax_macro, ax_micro) = plt.subplots(
+        2, 1, figsize=(px[0] / dpi, px[1] / dpi), dpi=dpi, sharey=True,
+        gridspec_kw={"height_ratios": [1, 1.3]})
+    colors = plt.cm.tab10(np.arange(len(dims)) % 10)
+
+    n_ctx = len(ctx_data)
+    for i in range(len(dims)):
+        ax_macro.plot(np.arange(-n_ctx, 0), ctx_plot[:, i], color=colors[i], linewidth=1.0, alpha=0.85)
+        ax_micro.plot(np.arange(w_len), local_plot[:, i], color=colors[i], linewidth=1.5)
+
+    ax_macro.set_xlim(-ctx_len, 0)
+    ax_macro.set_xticks(np.arange(-ctx_len, 1, 200))
+    ax_macro.set_title("PANEL 1: BASELINE (steps before the target window)",
+                       fontsize=8, fontweight="bold", color="navy")
+    ax_micro.set_xlim(0, w_len)
     
+    ax_micro.xaxis.set_major_locator(MultipleLocator(tick_step))
+    ax_micro.xaxis.set_minor_locator(MultipleLocator(10))
+    
+    ax_micro.set_title(f"PANEL 2: TARGET WINDOW UNDER INSPECTION (steps 0 to {w_len})",
+                       fontsize=8, fontweight="bold", color="darkgreen")
+    ax_micro.set_xlabel("step", fontsize=8)
+
+    for ax in (ax_macro, ax_micro):
+        ax.set_yscale("symlog", linthresh=3)
+        ax.set_ylim(-ymax, ymax)
+        ax.axhspan(-3, 3, color="green", alpha=0.08)              # visible normal band
+        ax.axhline(3.0, color="crimson", linestyle="--", linewidth=0.9)
+        ax.axhline(-3.0, color="crimson", linestyle="--", linewidth=0.9)
+        ax.axhline(0.0, color="gray", linewidth=0.6, alpha=0.5)
+        ax.grid(True, which="major", linestyle=":", alpha=0.4)
+        ax.set_ylabel("z-score", fontsize=8)
+        ax.tick_params(labelsize=7)
+
     plt.tight_layout()
     fig.canvas.draw()
     rgba_arr = np.asarray(fig.canvas.buffer_rgba())
@@ -336,3 +344,85 @@ def extract_logit_scores_and_features(outputs=None, inputs=None, processor=None,
         })
         
     return results
+
+LOC_SYSTEM = "You are a reliability engineer inspecting sensor telemetry plots. Reply with JSON only."
+
+LOC_PROMPT = (
+    "The image shows z-normalized sensor channels (one colored line per channel, 0 = typical level). "
+    "The green band between the red dashed lines is the normal range (±3 standard deviations).\n"
+    "- PANEL 1 (top): normal baseline behavior before the target window.\n"
+    "- PANEL 2 (bottom): the target window. Its x-axis shows steps 0 to 200 with labels every 20 steps.\n\n"
+    "An anomaly was detected in PANEL 2. Using the x-axis labels of PANEL 2, list the step ranges where "
+    "the anomalous behavior happens (lines outside the band, a level shift, or channels breaking from "
+    "PANEL 1 together). Reply with JSON only, for example {\"intervals\": [[60, 110], [150, 170]]}. "
+    "Use 0 <= start < end <= 200. Reply {\"intervals\": []} if you see none."
+)
+
+
+from matplotlib.patches import Patch
+ 
+def _runs(mask):
+    """Returns [(start, end), ...] for contiguous True runs in a boolean array."""
+    m = np.concatenate([[0], np.asarray(mask).astype(int), [0]])
+    d = np.diff(m)
+    return list(zip(np.where(d == 1)[0], np.where(d == -1)[0]))
+ 
+ 
+def render_annotated_plot(data, start_idx, end_idx, dims, gt, base_mean, base_std,
+                          teacher_mask=None, title="", save_path=None,
+                          figsize=(12, 6.5), dpi=110):
+    """Target-window plot with ground truth (red shading) and a comparison strip:
+    GT vs teacher dense mask."""
+    local = data[start_idx:end_idx]
+    w = len(local)
+    mu = base_mean[dims]
+    sigma = np.where(base_std[dims] < 1e-4, 1.0, base_std[dims])
+    z = (local[:, dims] - mu) / sigma
+    ymax = float(max(10.0, 1.1 * np.abs(z).max()))
+    gt = np.asarray(gt)[:w] >= 0.5
+ 
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=figsize, dpi=dpi, sharex=True,
+                                  gridspec_kw={"height_ratios": [4, 1.2]})
+    colors = plt.cm.tab10(np.arange(len(dims)) % 10)
+    for i, d in enumerate(dims):
+        ax.plot(np.arange(w), z[:, i], color=colors[i], linewidth=1.2, label=f"Dim {d}")
+ 
+    ax.set_yscale("symlog", linthresh=3)
+    ax.set_ylim(-ymax, ymax)
+    ax.axhspan(-3, 3, color="green", alpha=0.08)
+    ax.axhline(3, color="crimson", linestyle="--", linewidth=0.9)
+    ax.axhline(-3, color="crimson", linestyle="--", linewidth=0.9)
+    for s, e in _runs(gt):
+        ax.axvspan(s, e, color="red", alpha=0.18)
+    ax.set_ylabel("z-score (symlog)")
+    ax.set_title(title, fontsize=10, fontweight="bold")
+    ax.grid(True, which="major", linestyle=":", alpha=0.4)
+    ax.legend(loc="upper left", fontsize=7, ncol=min(6, len(dims)))
+ 
+    # comparison strip
+    rows = [("Ground truth", [(s, e - s) for s, e in _runs(gt)], "red")]
+    if teacher_mask is not None:
+        tm = np.asarray(teacher_mask)[:w] > 0
+        rows.append(("Teacher mask", [(s, e - s) for s, e in _runs(tm)], "darkorange"))
+    for y, (_, spans, c) in enumerate(rows):
+        if spans:
+            ax2.broken_barh(spans, (y - 0.4, 0.8), facecolors=c, alpha=0.8)
+    ax2.set_yticks(range(len(rows)))
+    ax2.set_yticklabels([r[0] for r in rows], fontsize=8)
+    ax2.set_ylim(-0.6, len(rows) - 0.4)
+    ax2.set_xlim(0, w)
+    ax2.set_xlabel("step in window")
+    ax2.xaxis.set_major_locator(MultipleLocator(20))
+    ax2.grid(True, axis="x", linestyle=":", alpha=0.4)
+ 
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path)
+        plt.close(fig)
+        return save_path
+    fig.canvas.draw()
+    img = Image.fromarray(np.asarray(fig.canvas.buffer_rgba())[:, :, :3])
+    plt.close(fig)
+    return img
+
+
