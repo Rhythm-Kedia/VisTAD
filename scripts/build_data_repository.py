@@ -1,10 +1,10 @@
 """
-build_data_repository.py: Builds a unified, clean, and Kaggle-ready data repository
-containing all 4 primary benchmarks: SWaT, SMD, MSL, and GECCO.
+build_data_repository.py: Builds a unified, clean, deduplicated, and Kaggle-ready data repository
+containing all 4 primary benchmarks (SWaT, SMD, MSL, GECCO) plus pre-computed Teacher Distillation Caches.
 
 Outputs:
 1. data/            - Local project data directory for immediate local testing.
-2. data_repository/ - Self-contained directory ready to upload as a Kaggle Dataset.
+2. data_repository/ - Clean, deduplicated directory ready to upload as a Kaggle Dataset.
 3. data_repository.zip - Zip archive for 1-click drag-and-drop upload to Kaggle.
 """
 
@@ -100,7 +100,6 @@ def download_file(url, dst):
     if os.path.exists(dst) and os.path.getsize(dst) > 0:
         return
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    # Use curl with browser user-agent to bypass CDN user-agent filters
     cmd = ["curl", "-sL", "-A", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "-o", dst, url]
     subprocess.run(cmd, check=True)
 
@@ -171,9 +170,9 @@ def process_gecco_dataset(target_dirs):
     for t_dir in target_dirs:
         out_dir = os.path.join(t_dir, "gecco")
         os.makedirs(out_dir, exist_ok=True)
+        # Canonical single file: gecco_water.csv
         df.to_csv(os.path.join(out_dir, "gecco_water.csv"), index=False)
-        df.to_csv(os.path.join(out_dir, "gecco.csv"), index=False)
-        print(f"[GECCO] Wrote -> {out_dir}/gecco_water.csv & gecco.csv")
+        print(f"[GECCO] Wrote -> {out_dir}/gecco_water.csv")
 
 
 def process_msl_dataset(target_dirs):
@@ -197,11 +196,9 @@ def process_msl_dataset(target_dirs):
     
     sensor_cols = [f"sensor_{i:02d}" for i in range(test_x.shape[1])]
     
-    # Build test dataframe
     df_test = pd.DataFrame(test_x, columns=sensor_cols)
     df_test["attack"] = test_y.astype(int)
     
-    # Build train dataframe
     df_train = pd.DataFrame(train_x, columns=sensor_cols)
     df_train["attack"] = 0
     
@@ -212,23 +209,43 @@ def process_msl_dataset(target_dirs):
     for t_dir in target_dirs:
         out_dir = os.path.join(t_dir, "msl")
         os.makedirs(out_dir, exist_ok=True)
+        # Canonical single files
         df_test.to_csv(os.path.join(out_dir, "msl_test.csv"), index=False)
-        df_test.to_csv(os.path.join(out_dir, "msl.csv"), index=False)
         df_train.to_csv(os.path.join(out_dir, "msl_train.csv"), index=False)
         shutil.copy2(test_x_p, os.path.join(out_dir, "MSL_test.npy"))
         shutil.copy2(test_y_p, os.path.join(out_dir, "MSL_test_label.npy"))
         shutil.copy2(train_x_p, os.path.join(out_dir, "MSL_train.npy"))
-        print(f"[MSL] Wrote -> {out_dir}/ (msl_test.csv, msl.csv, msl_train.csv, and raw .npy files)")
+        print(f"[MSL] Wrote -> {out_dir}/ (msl_test.csv, msl_train.csv, and raw .npy files)")
+
+
+def sync_teacher_cache(cache_src, target_dirs):
+    print(f"\n[Cache] Syncing teacher cache from {cache_src}...")
+    pt_files = sorted(glob.glob(os.path.join(cache_src, "*_teacher_cache.pt")))
+    if not pt_files:
+        print("[Cache] No teacher cache files found to sync.")
+        return
+        
+    for t_dir in target_dirs:
+        out_dir = os.path.join(t_dir, "cache")
+        os.makedirs(out_dir, exist_ok=True)
+        for pt in pt_files:
+            dst = os.path.join(out_dir, os.path.basename(pt))
+            shutil.copy2(pt, dst)
+        print(f"[Cache] Copied {len(pt_files)} teacher cache (.pt) files -> {out_dir}/")
 
 
 def create_dataset_card(repo_dir):
     readme_content = """# VisTAD Unified Benchmark Datasets
 
-This dataset archive contains the preprocessed, verified benchmark telemetry datasets for **VisTAD** (VLM-Guided Distillation for Time-Series Anomaly Detection).
+This dataset archive contains the preprocessed, verified, deduplicated benchmark telemetry datasets for **VisTAD** (VLM-Guided Distillation for Time-Series Anomaly Detection), including pre-computed Teacher Distillation Caches.
 
 ## Directory Structure
 ```text
 .
+├── cache/                         # Pre-computed Teacher Distillation Caches (.pt)
+│   ├── smd_machine-1-1_teacher_cache.pt
+│   ├── smd_machine-1-2_teacher_cache.pt
+│   └── ... (28 SMD entities)
 ├── smd/                           # Server Machine Dataset (38 channels, 28 entities)
 │   ├── test/                      # Telemetry matrices (comma/space-separated floats, no headers)
 │   │   ├── machine-1-1.txt
@@ -239,50 +256,35 @@ This dataset archive contains the preprocessed, verified benchmark telemetry dat
 │       └── ...
 ├── swat/                          # Secure Water Treatment (51 physical sensors & actuators)
 │   ├── SWaT_Dataset_Attack_v0.csv # Physical attack telemetry with binary 'attack' column
-│   ├── SWaT_Dataset_Normal_v1.csv # 7-day nominal continuous telemetry baseline ('attack'=0)
-│   ├── swat_attack.csv            # Convenient alias for attack telemetry
-│   └── swat_normal.csv            # Convenient alias for normal telemetry
+│   └── SWaT_Dataset_Normal_v1.csv # 7-day nominal continuous telemetry baseline ('attack'=0)
 ├── msl/                           # NASA Mars Science Laboratory (55 telemetry sensors/actuators)
 │   ├── msl_test.csv               # Processed test telemetry with binary 'attack' column
-│   ├── msl.csv                    # Alias for msl_test.csv
 │   ├── msl_train.csv              # Nominal training telemetry ('attack'=0)
 │   ├── MSL_test.npy               # Standard benchmark numpy array [73729, 55]
 │   ├── MSL_test_label.npy         # Benchmark binary label array [73729]
 │   └── MSL_train.npy              # Nominal training numpy array [58317, 55]
 └── gecco/                         # GECCO 2018 Water Quality Anomaly Detection (9 sensors)
-    ├── gecco_water.csv            # Continuous water telemetry with binary 'attack' column
-    └── gecco.csv                  # Convenient alias
+    └── gecco_water.csv            # Continuous water telemetry with binary 'attack' column
 ```
 
-## Dataset Specifications
+---
 
-### 1. SWaT (Secure Water Treatment)
-- **Origin**: iTrust, Centre for Research in Cyber Security, Singapore University of Technology and Design.
-- **Channels**: 51 physical process sensors and actuators across 6 stages (P1-P6).
-- **Ground Truth**: Column `attack` (1 = cyber-physical attack active, 0 = normal).
-- **Timesteps**: 449,919 steps (Attack: 54,621 steps, 12.14%).
+## Benchmark Specifications
 
-### 2. SMD (Server Machine Dataset)
-- **Origin**: NetMan AIOps OmniAnomaly Benchmark (collected from 28 machines over 5 weeks).
-- **Channels**: 38 continuous metrics per machine (CPU, Memory, Network, Disk).
-- **Ground Truth**: Stored in `test_label/` with exact 1-to-1 timestep alignment.
+| Benchmark | Domain | Channels | Timesteps | Anomalies | Source |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **SMD** | Server Infrastructure | 38 | ~28k / machine | 4.2% – 12.8% | [OmniAnomaly GitHub](https://github.com/NetManAIOps/OmniAnomaly) |
+| **SWaT** | Cyber-Physical Water | 51 | 449,919 | 12.13% | [iTrust Labs SUTD](https://itrust.sutd.edu.sg/itrust-labs_datasets/dataset_info/) |
+| **MSL** | Spacecraft Rover | 55 | 73,729 | 10.53% | [NASA JPL Telemanom](https://github.com/khundman/telemanom) |
+| **GECCO** | Drinking Water Quality | 9 | 139,566 | 1.24% | [Zenodo 3884398](https://zenodo.org/records/3884398) |
 
-### 3. MSL (Mars Science Laboratory Rover)
-- **Origin**: NASA Jet Propulsion Laboratory (JPL) Telemanom benchmark.
-- **Channels**: 55 continuous telemetry channels (actuators, sensors, power modules).
-- **Ground Truth**: Column `attack` (1 = labeled anomaly, 0 = normal).
-- **Timesteps**: 73,729 test steps (Anomalies: 7,766 steps, 10.53%).
+---
 
-### 4. GECCO (Drinking Water Quality)
-- **Origin**: Thüringer Fernwasserversorgung & SPOTSeven Lab (GECCO Industrial Challenge 2018).
-- **Channels**: 9 water quality sensors: Temperature (Tp), Chlorine (Cl, Cl_2), pH, Redox, Conductivity (Leit), Turbidity (Trueb), Flow Rate (Fm, Fm_2).
-- **Ground Truth**: Column `attack` (1 = operational disturbance/anomaly, 0 = nominal).
-- **Timesteps**: 139,566 continuous 1-minute steps (Anomalies: 1,726 steps, 1.24%).
+## How to Use in Kaggle
 
-## How to Mount in Kaggle
-1. Upload this folder or `data_repository.zip` to Kaggle Datasets as **`vistad-datasets`**.
-2. In your Kaggle Notebook, click **+ Add Data** and attach `vistad-datasets`.
-3. In VisTAD, `src/dataset.py` auto-detects datasets mounted under `/kaggle/input/` automatically!
+1. Upload this archive (`data_repository.zip`) as a Kaggle Dataset named **`vistad-datasets`**.
+2. Attach it to your Kaggle Notebook via **+ Add Data**.
+3. In `vistad_kaggle_pipeline.ipynb`, **Step 3** automatically mounts all 4 benchmarks and syncs the pre-computed teacher caches into the local workspace.
 """
     readme_path = os.path.join(repo_dir, "README.md")
     with open(readme_path, "w", encoding="utf-8") as f:
@@ -294,10 +296,22 @@ def main():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_dir = os.path.join(base_dir, "data")
     repo_dir = os.path.join(base_dir, "data_repository")
+    cache_dir = os.path.join(base_dir, "cache")
     
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(repo_dir, exist_ok=True)
     
+    # Clean up redundant legacy duplicate files if present
+    for d in [data_dir, repo_dir]:
+        for dup in [
+            os.path.join(d, "swat", "swat_attack.csv"),
+            os.path.join(d, "swat", "swat_normal.csv"),
+            os.path.join(d, "gecco", "gecco.csv"),
+            os.path.join(d, "msl", "msl.csv"),
+        ]:
+            if os.path.exists(dup):
+                os.remove(dup)
+                
     # 1. Process SWaT
     onedrive_dir = os.path.join(base_dir, "OneDrive_1_18-10-2026")
     swat_attack_xlsx = os.path.join(onedrive_dir, "SWaT_Dataset_Attack_v0.xlsx")
@@ -305,44 +319,32 @@ def main():
     
     existing_swat_attack = os.path.join(data_dir, "swat", "SWaT_Dataset_Attack_v0.csv")
     if os.path.exists(existing_swat_attack):
-        print(f"\n[SWaT] Found existing CSV at {existing_swat_attack}, ensuring copies and aliases exist...")
-        for p in [
-            os.path.join(repo_dir, "swat", "SWaT_Dataset_Attack_v0.csv"),
-            os.path.join(data_dir, "swat", "swat_attack.csv"),
-            os.path.join(repo_dir, "swat", "swat_attack.csv"),
-        ]:
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            if not os.path.exists(p):
-                shutil.copy2(existing_swat_attack, p)
+        print(f"\n[SWaT] Found existing CSV at {existing_swat_attack}, ensuring copy in data_repository...")
+        target_p = os.path.join(repo_dir, "swat", "SWaT_Dataset_Attack_v0.csv")
+        os.makedirs(os.path.dirname(target_p), exist_ok=True)
+        if not os.path.exists(target_p):
+            shutil.copy2(existing_swat_attack, target_p)
     elif os.path.exists(swat_attack_xlsx):
         process_swat_attack(
             swat_attack_xlsx,
             [
                 os.path.join(data_dir, "swat", "SWaT_Dataset_Attack_v0.csv"),
                 os.path.join(repo_dir, "swat", "SWaT_Dataset_Attack_v0.csv"),
-                os.path.join(data_dir, "swat", "swat_attack.csv"),
-                os.path.join(repo_dir, "swat", "swat_attack.csv"),
             ]
         )
         
     existing_swat_normal = os.path.join(data_dir, "swat", "SWaT_Dataset_Normal_v1.csv")
     if os.path.exists(existing_swat_normal):
-        for p in [
-            os.path.join(repo_dir, "swat", "SWaT_Dataset_Normal_v1.csv"),
-            os.path.join(data_dir, "swat", "swat_normal.csv"),
-            os.path.join(repo_dir, "swat", "swat_normal.csv"),
-        ]:
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            if not os.path.exists(p):
-                shutil.copy2(existing_swat_normal, p)
+        target_p = os.path.join(repo_dir, "swat", "SWaT_Dataset_Normal_v1.csv")
+        os.makedirs(os.path.dirname(target_p), exist_ok=True)
+        if not os.path.exists(target_p):
+            shutil.copy2(existing_swat_normal, target_p)
     elif os.path.exists(swat_normal_xlsx):
         process_swat_normal(
             swat_normal_xlsx,
             [
                 os.path.join(data_dir, "swat", "SWaT_Dataset_Normal_v1.csv"),
                 os.path.join(repo_dir, "swat", "SWaT_Dataset_Normal_v1.csv"),
-                os.path.join(data_dir, "swat", "swat_normal.csv"),
-                os.path.join(repo_dir, "swat", "swat_normal.csv"),
             ]
         )
         
@@ -355,10 +357,14 @@ def main():
     # 4. Process MSL dataset
     process_msl_dataset([data_dir, repo_dir])
     
-    # 5. Create manifest
+    # 5. Sync Teacher Cache files into data_repository
+    if os.path.exists(cache_dir):
+        sync_teacher_cache(cache_dir, [repo_dir])
+        
+    # 6. Create manifest
     create_dataset_card(repo_dir)
     
-    # 6. Create Kaggle ready zip archive
+    # 7. Create Kaggle ready zip archive
     zip_path = os.path.join(base_dir, "data_repository.zip")
     print(f"\n[Packaging] Building Kaggle zip archive: {zip_path}...")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:

@@ -153,10 +153,20 @@ def load_dataset_arrays(dataset_name="smd", entity="machine-1-1", data_dir="data
             candidates = glob.glob(os.path.join(target_dir, "*.csv"))
             for c in candidates:
                 base = os.path.splitext(os.path.basename(c))[0].lower()
-                ent_lower = entity.lower()
+                ent_lower = entity.lower().replace("-", "_")
                 if base == ent_lower or ent_lower in base or base in ent_lower:
                     csv_path = c
                     break
+                ent_tokens = set(ent_lower.split("_"))
+                base_tokens = set(base.split("_"))
+                if "attack" in ent_tokens and "attack" in base_tokens:
+                    csv_path = c
+                    break
+                if "normal" in ent_tokens and "normal" in base_tokens:
+                    csv_path = c
+                    break
+            if not os.path.exists(csv_path) and len(candidates) == 1:
+                csv_path = candidates[0]
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"Could not locate CSV file for entity '{entity}' in {target_dir}")
         df = pd.read_csv(csv_path)

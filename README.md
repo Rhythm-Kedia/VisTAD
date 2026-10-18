@@ -189,9 +189,44 @@ python train.py training.loss_weights.w_feat=0.0 training.loss_weights.w_resp=0.
 | `dataset` | `name` | `smd`, `swat`, `msl`, `gecco` | Target telemetry dataset. |
 | `dataset` | `window_size` | `200` | Local window length ($L$). |
 | `dataset` | `stride` | `100` | Training window stride ($50\%$ overlap). |
-| `channel_filter` | `strategy` | `top_k_zscore`, `top_k_variance`, `none` | Active sensor selection logic. |
+| `channel_filter` | `strategy` | `median_shift`, `top_k_zscore`, `top_k_variance`, `none` | Active sensor selection logic. |
 | `channel_filter` | `k` | `6` | Number of channels to plot and feed. |
 | `student` | `architecture` | `cnn_1d`, `bilstm`, `timesnet` | Student backbone architecture. |
 | `student` | `hidden_dim` | `128` | Latent layer capacity. |
 | `training` | `loss_weights` | `w_sup`, `w_feat`, `w_resp` | Relative weights for the three losses. |
+
+---
+
+## Benchmark Datasets & Automated Setup
+
+VisTAD supports four major multivariate benchmarks, complete with pre-computed teacher caches:
+- **SMD**: 38 continuous channels across 28 server entities ([NetManAIOps/OmniAnomaly](https://github.com/NetManAIOps/OmniAnomaly)).
+- **SWaT**: 51 physical sensors & actuators across 6 water treatment stages ([iTrust SUTD](https://itrust.sutd.edu.sg/itrust-labs_datasets/dataset_info/)).
+- **MSL**: 55 telemetry channels from NASA's Curiosity Mars rover ([NASA JPL Telemanom](https://github.com/khundman/telemanom)).
+- **GECCO**: 9 drinking water quality monitoring sensors ([Zenodo Record 3884398](https://zenodo.org/records/3884398)).
+
+### 1-Click Dataset Builder
+To automatically fetch all benchmarks, clean SWaT, sync teacher caches, and package the Kaggle-ready archive (`data_repository.zip`):
+
+```bash
+python scripts/build_data_repository.py
+```
+
+### Running Distillation on Any Benchmark
+Each benchmark has a ready-to-use profile under `configs/`:
+
+```bash
+# 1. Offline VLM Teacher Caching (or use pre-computed cache in cache/)
+python run_teacher_cache.py --config configs/smd.yaml    # Server machines
+python run_teacher_cache.py --config configs/swat.yaml   # Cyber-physical water
+python run_teacher_cache.py --config configs/msl.yaml    # Spacecraft rover
+python run_teacher_cache.py --config configs/gecco.yaml  # Water quality
+
+# 2. Student Training (Channel-Independent 1D-CNN)
+python train.py --config configs/<dataset>.yaml
+
+# 3. Continuous Streaming POT Evaluation
+python evaluate.py --config configs/<dataset>.yaml
+```
+
 
