@@ -4,6 +4,7 @@ import argparse
 import time
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
+import pandas as pd
 import torch
 
 from src.dataset import load_dataset_arrays, select_top_k_channels
@@ -123,6 +124,7 @@ def parse_args():
     parser.add_argument("--display-images", action="store_true",help="Save the full and VLM-view images for the first few windows to --debug-dir")
     parser.add_argument("--display-count", type=int, default=6, help="How many windows to save when --display-images is set")
     parser.add_argument("--debug-dir", type=str, default="debug_images",help="Folder for the saved debug images")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing cache instead of resuming")
     return parser.parse_args()
 
 
@@ -156,14 +158,41 @@ def main():
     )
     
     w_size = cfg["dataset"]["window_size"]
+    dname = cfg["dataset"]["name"].lower()
+    norm_mode = cfg["teacher"].get("norm_mode", "static")
     
     bs = cfg["dataset"].get("baseline_steps", 3000)
-    base_m = np.mean(raw_data[:bs], axis=0)
-    base_s = np.std(raw_data[:bs], axis=0)
-    pos = base_s[base_s > 1e-8]
-    floor = 0.05 * np.median(pos) if len(pos) else 1.0     # 5% of a typical channel's std
-    base_s = np.maximum(base_s, max(floor, 1e-6))
-    print(f"Baseline std: min={base_s.min():.4f} median={np.median(base_s):.4f} max={base_s.max():.4f} (floor={floor:.4f})")
+    if dname == "msl":
+        # Load clean msl_train to establish nominal baseline without contamination
+        clean_train_path = os.path.join(cfg["dataset"].get("data_dir", "data"), "msl", "msl_train.csv")
+        if os.path.exists(clean_train_path):
+            print(f"Loading clean nominal flight baseline from {clean_train_path}...")
+            df_clean = pd.read_csv(clean_train_path)
+            clean_data = df_clean.drop(columns=[c for c in ["attack", "label", "timestamp"] if c in df_clean.columns]).values
+            base_m = np.mean(clean_data, axis=0)
+            base_s = np.std(clean_data, axis=0)
+            base_s[0] = max(base_s[0], 0.1)
+            for col_i in range(1, len(base_s)):
+                base_s[col_i] = max(base_s[col_i], 0.5)
+        else:
+            base_m = np.mean(raw_data[:bs], axis=0)
+            base_s = np.maximum(np.std(raw_data[:bs], axis=0), 0.5)
+    elif dname == "gecco":
+        base_m = np.mean(raw_data[:bs], axis=0)
+        base_s = np.std(raw_data[:bs], axis=0)
+        # Physical noise floors: Tp: 0.5C, Cl: 0.02, pH: 0.10, Redox: 5.0, Leit: 5.0, Trueb: 0.02, Cl_2: 0.02, Fm: 50.0, Fm_2: 50.0
+        phys_floor = np.array([0.5, 0.02, 0.10, 5.0, 5.0, 0.02, 0.02, 50.0, 50.0])
+        if len(base_s) == len(phys_floor):
+            base_s = np.maximum(base_s, phys_floor)
+        else:
+            base_s = np.maximum(base_s, 0.05)
+    else:
+        base_m = np.mean(raw_data[:bs], axis=0)
+        base_s = np.std(raw_data[:bs], axis=0)
+        pos = base_s[base_s > 1e-8]
+        floor = 0.05 * np.median(pos) if len(pos) else 1.0     # 5% of a typical channel's std
+        base_s = np.maximum(base_s, max(floor, 1e-6))
+    print(f"Baseline std: min={base_s.min():.4f} median={np.median(base_s):.4f} max={base_s.max():.4f}")
     
     print(f"Loaded {len(raw_data)} steps of {cfg['dataset']['name']}.")
     
@@ -207,19 +236,28 @@ def main():
     ctx_len = cfg["teacher"].get("macro_context_len", 800)
 
     def get_top_dims(st):
-                end = st + w_size
-                ctx_slice = raw_data[max(0, st - ctx_len):st]
-                return select_top_k_channels(
-                    raw_data[st:end], base_mean=base_m, base_std=base_s, ctx_data=ctx_slice,
-                    strategy=cfg["channel_filter"].get("strategy", "median_shift"),
-                    k=cfg["channel_filter"].get("k", 6),
-                )
+        end = st + w_size
+        ctx_slice = raw_data[max(0, st - ctx_len):st]
+        if norm_mode == "rolling" and len(ctx_slice) >= 20:
+            cur_m = np.median(ctx_slice, axis=0)
+            cur_s = np.maximum(np.std(ctx_slice, axis=0), base_s)
+        else:
+            cur_m = base_m
+            cur_s = base_s
+        return select_top_k_channels(
+            raw_data[st:end], base_mean=cur_m, base_std=cur_s, ctx_data=ctx_slice,
+            strategy=cfg["channel_filter"].get("strategy", "median_shift"),
+            k=cfg["channel_filter"].get("k", 6),
+            force_include_channel_0=(dname == "msl"),
+        )
                 
-    if os.path.exists(cache_file):
+    if os.path.exists(cache_file) and not args.overwrite:
         print(f"Found existing teacher cache at {cache_file}. Loading to resume...")
         teacher_cache = torch.load(cache_file)
         print(f"Loaded {len(teacher_cache)} existing cached windows.")
     else:
+        if args.overwrite and os.path.exists(cache_file):
+            print(f"--overwrite specified: Overwriting existing teacher cache at {cache_file}...")
         teacher_cache = {}
     
     
@@ -372,27 +410,36 @@ def main():
                 
                 filter_strategy = cfg["channel_filter"].get("strategy", "median_shift")
                 k_channels = cfg["channel_filter"].get("k", 6)
+                if norm_mode == "rolling" and len(ctx_slice) >= 20:
+                    cur_m = np.median(ctx_slice, axis=0)
+                    cur_s = np.maximum(np.std(ctx_slice, axis=0), base_s)
+                else:
+                    cur_m = base_m
+                    cur_s = base_s
+
                 top_dims = select_top_k_channels(
                     window_slice, 
-                    base_mean=base_m, 
-                    base_std=base_s, 
+                    base_mean=cur_m, 
+                    base_std=cur_s, 
                     ctx_data=ctx_slice, 
                     strategy=filter_strategy, 
-                    k=k_channels
+                    k=k_channels,
+                    force_include_channel_0=(dname == "msl")
                 )
                 channel_names = [f"Dim {d}" for d in top_dims]
                 batch_windows.append(window_slice)
                 batch_top_dims.append(top_dims)
                 
                 peak_z, sustained_steps, mean_z = extract_telemetry_metrics(
-                    window_slice, base_m, base_s, top_dims
+                    window_slice, cur_m, cur_s, top_dims
                 )
                 
                 # in-memory rendering: returns a PIL Image directly without disk I/O, z-normalized
                 img = render_dual_horizon_image(
                     raw_data, st, end, top_dims,
                     base_mean=base_m, base_std=base_s,
-                    ctx_len=ctx_len
+                    ctx_len=ctx_len,
+                    norm_mode=norm_mode
                 )
                 
                 if args.display_images and st in curriculum_starts[:args.display_count]:

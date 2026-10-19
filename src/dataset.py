@@ -10,7 +10,7 @@ def split_series(raw, labels, train_frac=0.5, val_frac=0.1):
     a, b = int(n * train_frac), int(n * (train_frac + val_frac))
     return (raw[:a], labels[:a]), (raw[a:b], labels[a:b]), (raw[b:], labels[b:])
 
-def select_top_k_channels(window_data, base_mean=None, base_std=None, ctx_data=None, strategy="median_shift", k=6):
+def select_top_k_channels(window_data, base_mean=None, base_std=None, ctx_data=None, strategy="median_shift", k=6, force_include_channel_0=False):
     """Filters channels to Top-K avoiding visual clutter and dead-channel division explosions."""
     num_channels = window_data.shape[1]
     if strategy == "none" or num_channels <= k:
@@ -26,7 +26,11 @@ def select_top_k_channels(window_data, base_mean=None, base_std=None, ctx_data=N
             reference = np.median(window_data, axis=0)
             
         deltas = np.max(np.abs(window_data - reference), axis=0)
-        top_k_idx = np.argsort(deltas)[::-1][:k]
+        if base_std is not None:
+            deltas = deltas / np.maximum(base_std, 1e-4)
+        top_k_idx = list(np.argsort(deltas)[::-1][:k])
+        if force_include_channel_0 and 0 not in top_k_idx:
+            top_k_idx = [0] + top_k_idx[:k - 1]
         return sorted(list(top_k_idx))
 
     # 2. Legacy fallback: Top-K Z-Score with robust standard deviation floor
@@ -35,15 +39,22 @@ def select_top_k_channels(window_data, base_mean=None, base_std=None, ctx_data=N
         ref = base_mean if base_mean is not None else np.mean(window_data, axis=0)
         z_scores = np.abs((window_data - ref) / denom)
         max_z = np.max(z_scores, axis=0)
-        top_k_idx = np.argsort(max_z)[::-1][:k]
+        top_k_idx = list(np.argsort(max_z)[::-1][:k])
+        if force_include_channel_0 and 0 not in top_k_idx:
+            top_k_idx = [0] + top_k_idx[:k - 1]
         return sorted(list(top_k_idx))
         
     elif strategy == "top_k_variance":
         variances = np.var(window_data, axis=0)
-        top_k_idx = np.argsort(variances)[::-1][:k]
+        top_k_idx = list(np.argsort(variances)[::-1][:k])
+        if force_include_channel_0 and 0 not in top_k_idx:
+            top_k_idx = [0] + top_k_idx[:k - 1]
         return sorted(list(top_k_idx))
     
-    return list(range(min(k, num_channels)))
+    default_idx = list(range(min(k, num_channels)))
+    if force_include_channel_0 and 0 not in default_idx:
+        default_idx = [0] + default_idx[:k - 1]
+    return sorted(default_idx)
 
 
 class TimeSeriesDataset(Dataset):

@@ -57,7 +57,8 @@ def extract_telemetry_metrics(w_slice, base_m, base_s, top_dims):
     return peak_z, max_sustained, mean_z
 
 def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, base_std=None,
-                              save_path=None, ctx_len=800, px=(588, 336), dpi=100, tick_step=50):
+                              save_path=None, ctx_len=800, px=(588, 336), dpi=100, tick_step=50,
+                              norm_mode="static"):
     """Dual-panel plot sized to the VLM pixel budget (588x336 <= 256*28*28).
     Shared symlog y-axis: linear inside +-3 sigma, logarithmic beyond, so spikes of 25 and 1200 sigma both fit."""
     ctx_start = max(0, start_idx - ctx_len)
@@ -65,8 +66,15 @@ def render_dual_horizon_image(data, start_idx, end_idx, dims, base_mean=None, ba
     local_data = data[start_idx:end_idx]
     w_len = len(local_data)
 
-    mu = base_mean[dims] if base_mean is not None else np.mean(ctx_data[:, dims], axis=0)
-    sigma = base_std[dims] if base_std is not None else np.std(ctx_data[:, dims], axis=0)
+    if norm_mode == "rolling" and len(ctx_data) >= 20:
+        mu = np.median(ctx_data[:, dims], axis=0)
+        ctx_s = np.std(ctx_data[:, dims], axis=0)
+        floor = base_std[dims] if base_std is not None else 1e-4
+        sigma = np.maximum(ctx_s, floor)
+    else:
+        mu = base_mean[dims] if base_mean is not None else np.mean(ctx_data[:, dims], axis=0)
+        sigma = base_std[dims] if base_std is not None else np.std(ctx_data[:, dims], axis=0)
+
     sigma = np.where(sigma < 1e-4, 1.0, sigma)
     ctx_plot = (ctx_data[:, dims] - mu) / sigma
     local_plot = (local_data[:, dims] - mu) / sigma
