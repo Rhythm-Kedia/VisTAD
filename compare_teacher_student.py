@@ -56,6 +56,11 @@ def eval_scores(y_true, scores, default_thresh=0.5):
 
 
 def find_latest_checkpoint(dataset, entity, arch):
+    if entity:
+        candidates = glob.glob(f"checkpoints/{dataset}_{entity}_{arch}*_best.pt")
+        if candidates:
+            candidates.sort(key=os.path.getmtime, reverse=True)
+            return candidates[0]
     candidates = glob.glob(f"checkpoints/{dataset}_*_{arch}*_best.pt")
     if not candidates:
         candidates = glob.glob(f"checkpoints/{dataset}_*_best.pt")
@@ -103,8 +108,16 @@ def main():
             print(f"Skipping {name}: Cache not found at {cache_path}")
             continue
             
-        # Find best student checkpoint
-        ckpt = find_latest_checkpoint(ds, ent, "tcn") or find_latest_checkpoint(ds, ent, "cnn_1d")
+        # Find best student checkpoint (prefer 1D-CNN foundation student, fallback to TCN)
+        if ds == "smd":
+            ckpt = (find_latest_checkpoint(ds, "pooled28", "cnn_1d") or
+                    find_latest_checkpoint(ds, "pooled28", "tcn") or
+                    find_latest_checkpoint(ds, ent, "cnn_1d") or
+                    find_latest_checkpoint(ds, ent, "tcn"))
+        else:
+            ckpt = find_latest_checkpoint(ds, ent, "cnn_1d") or find_latest_checkpoint(ds, ent, "tcn")
+        if not ckpt or not os.path.exists(ckpt):
+            ckpt = find_latest_checkpoint(ds, ent, "")
         if not ckpt or not os.path.exists(ckpt):
             print(f"Skipping {name}: No checkpoint found for {ds}")
             continue
@@ -113,9 +126,9 @@ def main():
         print(f"  Teacher Cache: {cache_path}")
         print(f"  Student Checkpoint: {ckpt}")
         
-        # Determine student architecture from checkpoint path or state dict
-        arch = "tcn" if "tcn" in ckpt else "cnn_1d"
-        num_layers = 5 if arch == "tcn" else 3
+        # Determine student architecture from checkpoint path
+        arch = "cnn_1d" if "cnn_1d" in ckpt else ("tcn" if "tcn" in ckpt else "cnn_1d")
+        num_layers = 3 if arch == "cnn_1d" else (5 if arch == "tcn" else 3)
         
         # Load raw data
         raw_data, labels = load_dataset_arrays(ds, ent, "data")
