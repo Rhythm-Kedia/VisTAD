@@ -21,7 +21,8 @@ __pycache__/
 venv/
 *.log
 *.ipynb
-!vistad_kaggle_pipeline.ipynb
+.ipynb_checkpoints/
 report/
+results/
 log*
 Notes/
