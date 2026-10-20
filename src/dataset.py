@@ -3,6 +3,7 @@ import glob
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 def split_series(raw, labels, train_frac=0.5, val_frac=0.1):
@@ -114,7 +115,14 @@ class TimeSeriesDataset(Dataset):
             t_data = self.teacher_cache[start]
             sample["a_teacher"] = torch.tensor(t_data.get("anomaly_likelihood", 0.0), dtype=torch.float32)
             sample["z_teacher"] = t_data.get("z_feature", torch.zeros(2048, dtype=torch.float32))
-            sample["y_teacher_dense"] = t_data.get("teacher_dense_mask", torch.zeros(self.window_size, dtype=torch.float32))
+            tdm = t_data.get("teacher_dense_mask")
+            if isinstance(tdm, torch.Tensor):
+                if len(tdm) != self.window_size:
+                    tdm = F.interpolate(tdm.unsqueeze(0).unsqueeze(0).float(),
+                                        size=self.window_size, mode="nearest").squeeze(0).squeeze(0)
+                sample["y_teacher_dense"] = tdm.float()
+            else:
+                sample["y_teacher_dense"] = torch.zeros(self.window_size, dtype=torch.float32)
         else:
             sample["a_teacher"] = torch.tensor(0.0, dtype=torch.float32)
             sample["z_teacher"] = torch.zeros(2048, dtype=torch.float32)

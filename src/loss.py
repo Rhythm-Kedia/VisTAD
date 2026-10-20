@@ -38,6 +38,9 @@ class MultiObjectiveKDLoss(nn.Module):
             l_sup = 0.6 * l_dense + 0.4 * l_scalar
             losses["loss_sup"] = l_sup.item()
             total_loss += self.w_sup * l_sup
+            
+            # TODO: Temporal Total Variation (TV) loss on pred_dense to penalize high-frequency noise spikes
+            # e.g., l_tv = torch.mean(torch.abs(pred_dense[:, 1:] - pred_dense[:, :-1]))
         else:
             losses["loss_sup"] = 0.0
 
