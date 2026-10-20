@@ -22,6 +22,7 @@ def parse_args():
     parser.add_argument("--num_layers", type=int, default=None, help="Number of model layers")
     parser.add_argument("--stride", type=int, default=10, help="Continuous evaluation sliding stride (default: 10)")
     parser.add_argument("--eval_slice", type=str, default="test", choices=["test", "all"], help="Evaluation slice ('test' for held-out, 'all' for full)")
+    parser.add_argument("--tag", type=str, default=None, help="Experiment tag suffix")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory to save evaluation JSON")
     return parser.parse_args()
 
@@ -176,12 +177,14 @@ def main():
     print("=" * 68 + "\n")
     
     os.makedirs(args.output_dir, exist_ok=True)
-    out_filename = f"{dataset_name}_{entity}_{arch}_eval.json"
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    out_filename = f"{dataset_name}_{entity}_{arch}{tag_suffix}_eval.json"
     out_path = os.path.join(args.output_dir, out_filename)
     results = {
         "dataset": dataset_name,
         "entity": entity,
         "architecture": arch,
+        "tag": args.tag,
         "num_layers": num_layers,
         "slice": args.eval_slice,
         "parameters": param_count,
