@@ -1,7 +1,7 @@
 # VisTAD Configuration: SWaT (Secure Water Treatment)
 dataset:
   name: "swat"
-  entity: "SWaT_Dataset_Attack_v0"
+  entity: "swat_attack"
   data_dir: "data"
   window_size: 200
   stride: 100

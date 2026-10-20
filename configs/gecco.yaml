@@ -37,6 +37,6 @@ teacher:
   cache_dir: "cache"
   macro_context_len: 800
   norm_mode: "rolling"
-  decision_threshold: 0.68
+  decision_threshold: 0.50
   min_pixels: 100352
   max_pixels: 200704
