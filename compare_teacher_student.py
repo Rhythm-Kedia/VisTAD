@@ -134,7 +134,7 @@ def main():
         raw_data, labels = load_dataset_arrays(ds, ent, "data")
         bs_steps = 3000
         base_m = np.mean(raw_data[:bs_steps], axis=0)
-        base_s = np.std(raw_data[:bs_steps], axis=0) + 1e-6
+        base_s = np.maximum(np.std(raw_data[:bs_steps], axis=0), 0.05)
         num_ch = raw_data.shape[1]
         in_ch = k if num_ch > k else num_ch
         

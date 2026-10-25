@@ -34,6 +34,8 @@ def parse_args():
                         help="Path to directory containing teacher caches")
     parser.add_argument("--epochs", type=int, default=15, help="Training epochs per experiment")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--backbones", type=str, default="cnn_1d,tcn",
+                        help="Comma-separated student backbones (default: 'cnn_1d,tcn')")
     parser.add_argument("--output_summary", type=str, default="results/ablation_summary.md",
                         help="Summary markdown output file")
     return parser.parse_args()
@@ -56,12 +58,14 @@ def main():
     
     # 1. Study: Symmetric Student Backbone Exploration
     if args.study in ["all", "backbone"]:
-        backbones = [
+        all_backbones = [
             {"arch": "cnn_1d", "layers": 3, "tag": "backbone_cnn3", "label": "1D-CNN (3L)"},
             {"arch": "tcn", "layers": 5, "tag": "backbone_tcn5_residual", "label": "Residual TCN (5L)"},
             {"arch": "timesnet", "layers": 3, "tag": "backbone_timesnet", "label": "TimesNet (3L)"},
             {"arch": "bilstm", "layers": 2, "tag": "backbone_bilstm", "label": "BiLSTM (2L)"}
         ]
+        sel_archs = [x.strip().lower() for x in args.backbones.split(",")]
+        backbones = [b for b in all_backbones if b["arch"].lower() in sel_archs]
         for tgt in tgt_datasets:
             c = cfg_map[tgt]
             train_entity = "all" if tgt == "smd" else c["entity"]
@@ -78,9 +82,10 @@ def main():
                     "num_layers": b["layers"],
                     "tag": f"{b['tag']}_{tgt}",
                     "epochs": args.epochs,
-                    "w_sup": 1.0,
-                    "w_feat": 0.1,
+                    "w_sup": 1.5 if tgt == "msl" else 1.0,
+                    "w_feat": 0.05 if tgt == "msl" else 0.1,
                     "w_resp": 0.2 if tgt == "msl" else (0.5 if tgt == "gecco" else 1.0),
+                    "pos_weight": 4.0 if tgt == "msl" else 2.0,
                     "thresh": c["thresh"]
                 })
             
@@ -231,7 +236,10 @@ def main():
             "--w_resp", str(exp["w_resp"]),
             "--decision_threshold", str(exp["thresh"]),
             "--tag", exp["tag"]
-        ] + exp.get("overrides", [])
+        ]
+        if "pos_weight" in exp:
+            train_cmd.extend(["--pos_weight", str(exp["pos_weight"])])
+        train_cmd.extend(exp.get("overrides", []))
         run_cmd(train_cmd)
         
         # Target checkpoint path
