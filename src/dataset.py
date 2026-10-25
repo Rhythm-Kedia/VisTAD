@@ -28,7 +28,7 @@ def select_top_k_channels(window_data, base_mean=None, base_std=None, ctx_data=N
             
         deltas = np.max(np.abs(window_data - reference), axis=0)
         if base_std is not None:
-            deltas = deltas / np.maximum(base_std, 1e-4)
+            deltas = deltas / np.maximum(base_std, 0.05)
         top_k_idx = list(np.argsort(deltas)[::-1][:k])
         if force_include_channel_0 and 0 not in top_k_idx:
             top_k_idx = [0] + top_k_idx[:k - 1]
@@ -74,7 +74,8 @@ class TimeSeriesDataset(Dataset):
         self.labels = np.asarray(labels, dtype=np.float32) if labels is not None else np.zeros(len(data), dtype=np.float32)
         
         self.base_mean = base_mean if base_mean is not None else np.mean(self.data[:min(3000, len(self.data))], axis=0)
-        self.base_std = base_std if base_std is not None else np.std(self.data[:min(3000, len(self.data))], axis=0) + 1e-6
+        raw_std = np.std(self.data[:min(3000, len(self.data))], axis=0) if base_std is None else base_std
+        self.base_std = np.maximum(raw_std, 0.05)  # Enforce minimum std to prevent 1e6 division blowup on constant/binary channels
         
         total_len = len(self.data)
         self.indices = [i for i in range(0, total_len - window_size + 1, stride)]
