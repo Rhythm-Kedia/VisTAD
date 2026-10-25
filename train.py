@@ -29,6 +29,7 @@ def parse_args():
     parser.add_argument("--w_sup", type=float, default=None, help="Supervised anchor loss weight")
     parser.add_argument("--w_feat", type=float, default=None, help="Latent feature distillation weight")
     parser.add_argument("--w_resp", type=float, default=None, help="Soft response distillation weight")
+    parser.add_argument("--pos_weight", type=float, default=None, help="BCE loss positive class multiplier")
     parser.add_argument("--decision_threshold", type=float, default=None, help="Calibrated threshold for response loss")
     parser.add_argument("--tag", type=str, default=None, help="Experiment variant tag for checkpoint naming")
     parser.add_argument("--train_frac", type=float, default=0.5, help="Chronological fraction used for training")
@@ -113,6 +114,7 @@ def main():
         lw["w_resp"] = args.w_resp
     if args.decision_threshold is not None:
         cfg["teacher"]["decision_threshold"] = args.decision_threshold
+    pos_weight = args.pos_weight if args.pos_weight is not None else cfg["training"].get("pos_weight", 2.0)
 
     name = cfg["dataset"]["name"]
     cache_dir = cfg["teacher"]["cache_dir"]
@@ -193,7 +195,7 @@ def main():
     val_loader = DataLoader(ConcatDataset(val_sets), batch_size=bs, shuffle=False) if val_sets else None
     print(f"Train windows: {len(train_dataset)} | Val windows: {sum(len(d) for d in val_sets)} | Test entities: {len(test_sets)}")
 
-    # Device selection (Apple Silicon MPS > CUDA > CPU)
+    # Device selection
     if torch.cuda.is_available():
         device = "cuda"
     elif torch.backends.mps.is_available():
@@ -213,7 +215,8 @@ def main():
     loss_fn = MultiObjectiveKDLoss(
         w_sup=lw["w_sup"], w_feat=lw["w_feat"], w_resp=lw["w_resp"],
         temperature=cfg["training"].get("temperature", 2.0),
-        decision_threshold=cfg["teacher"].get("decision_threshold", 0.63)
+        decision_threshold=cfg["teacher"].get("decision_threshold", 0.63),
+        pos_weight=pos_weight
     )
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=cfg["training"]["lr"],
                                   weight_decay=cfg["training"].get("weight_decay", 1e-4))
@@ -275,6 +278,7 @@ def main():
         "batch_size": bs,
         "lr": cfg["training"]["lr"],
         "loss_weights": lw,
+        "pos_weight": pos_weight,
         "decision_threshold": cfg["teacher"].get("decision_threshold", 0.63),
         "best_val_auroc": best_val,
         "test_mean_auroc": mean_auc if valid else None,

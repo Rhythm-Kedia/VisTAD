@@ -6,7 +6,7 @@ import torch.nn.functional as F
 class MultiObjectiveKDLoss(nn.Module):
     """Composite Knowledge Distillation Loss for TSAD."""
     
-    def __init__(self, w_sup=1.0, w_feat=0.1, w_resp=1.0, temperature=2.0, decision_threshold=0.63, beta=8.0):
+    def __init__(self, w_sup=1.0, w_feat=0.1, w_resp=1.0, temperature=2.0, decision_threshold=0.63, beta=8.0, pos_weight=2.0):
         super().__init__()
         self.w_sup = w_sup
         self.w_feat = w_feat
@@ -14,6 +14,7 @@ class MultiObjectiveKDLoss(nn.Module):
         self.temp = temperature
         self.threshold = decision_threshold
         self.beta = beta
+        self.pos_weight = float(pos_weight)
         
         self.bce_loss = nn.BCELoss()
         
@@ -28,12 +29,12 @@ class MultiObjectiveKDLoss(nn.Module):
             eps = 1e-7
             p_d = torch.clamp(pred_dense, eps, 1.0 - eps)
             # Imbalance-weighted BCE for dense steps (positive anomalies are rare)
-            l_dense = - torch.mean(2.0 * gt_dense * torch.log(p_d) + (1.0 - gt_dense) * torch.log(1.0 - p_d))
+            l_dense = - torch.mean(self.pos_weight * gt_dense * torch.log(p_d) + (1.0 - gt_dense) * torch.log(1.0 - p_d))
             
             pred_scalar = student_outputs["score_scalar"]
             gt_flag = batch["y_flag"].to(pred_scalar.device)
             p_s = torch.clamp(pred_scalar, eps, 1.0 - eps)
-            l_scalar = - torch.mean(2.0 * gt_flag * torch.log(p_s) + (1.0 - gt_flag) * torch.log(1.0 - p_s))
+            l_scalar = - torch.mean(self.pos_weight * gt_flag * torch.log(p_s) + (1.0 - gt_flag) * torch.log(1.0 - p_s))
             
             l_sup = 0.6 * l_dense + 0.4 * l_scalar
             losses["loss_sup"] = l_sup.item()
