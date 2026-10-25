@@ -81,8 +81,32 @@ def compute_temporal_iou(pred_events, gt_events):
     return float(np.mean(ious))
 
 
-def compute_affiliation_metrics(y_true, y_pred):
-    """Computes range-aware Affiliation Precision, Recall, and F1 in O(N + M) two-pointer time."""
+def smooth_binary_predictions(binary_sequence, min_duration=3, merge_gap=10):
+    """Fuses fragmented micro-events and filters isolated point-spikes (temporal hysteresis)."""
+    events = find_events(binary_sequence)
+    if not events:
+        return np.zeros_like(binary_sequence)
+        
+    merged = []
+    for s, e in events:
+        if (e - s) < min_duration:
+            continue
+        if merged and (s - merged[-1][1]) <= merge_gap:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+            
+    smoothed = np.zeros_like(binary_sequence)
+    for s, e in merged:
+        smoothed[s:e] = 1
+    return smoothed
+
+
+def compute_affiliation_metrics(y_true, y_pred, smooth=False, min_duration=3, merge_gap=10):
+    """Computes range-aware Affiliation Precision, Recall, and F1 with optional event smoothing."""
+    if smooth:
+        y_pred = smooth_binary_predictions(y_pred, min_duration=min_duration, merge_gap=merge_gap)
+        
     gt_events = find_events(y_true)
     pred_events = find_events(y_pred)
     
@@ -118,20 +142,66 @@ def compute_affiliation_metrics(y_true, y_pred):
     }
 
 
+def compute_vus_metrics(y_true, scores, max_buffer=50, num_steps=10):
+    """Computes Volume Under the Surface (VUS-PR & VUS-ROC) across varying tolerance buffers (Paparrizos et al., VLDB 2022)."""
+    y = np.asarray(y_true >= 0.5, dtype=int)
+    s = np.asarray(scores, dtype=float)
+    if y.sum() == 0 or (1 - y).sum() == 0:
+        return {"vus_roc": float("nan"), "vus_pr": float("nan")}
+        
+    gt_events = find_events(y)
+    n = len(y)
+    buffers = np.linspace(0, max_buffer, num_steps, dtype=int)
+    
+    rocs = []
+    prcs = []
+    
+    for buf in buffers:
+        if buf == 0:
+            y_buf = y
+        else:
+            y_buf = np.zeros(n, dtype=int)
+            for s_e, e_e in gt_events:
+                st = max(0, s_e - buf)
+                ed = min(n, e_e + buf)
+                y_buf[st:ed] = 1
+                
+        if y_buf.sum() > 0 and (1 - y_buf).sum() > 0:
+            rocs.append(roc_auc_score(y_buf, s))
+            prcs.append(average_precision_score(y_buf, s))
+        else:
+            rocs.append(1.0 if y_buf.sum() > 0 else 0.0)
+            prcs.append(1.0 if y_buf.sum() > 0 else 0.0)
+            
+    return {
+        "vus_roc": float(np.mean(rocs)),
+        "vus_pr": float(np.mean(prcs))
+    }
+
+
 def compute_dynamic_pot_threshold(scores, q=1e-3, level=0.98):
     """Dynamic Peaks-Over-Threshold (POT) using generalized Pareto tail modeling."""
-    max_score = float(np.max(scores))
-    init_threshold = float(np.quantile(scores, level))
-    peaks = scores[scores > init_threshold] - init_threshold
+    clean = np.asarray(scores, dtype=np.float32)
+    clean = clean[~np.isnan(clean) & ~np.isinf(clean)]
+    if len(clean) == 0:
+        return 0.20
+        
+    max_score = float(np.max(clean))
+    min_score = float(np.min(clean))
+    if max_score - min_score < 1e-4:
+        return float(max(max_score * 1.05, 0.20))
+        
+    init_threshold = float(np.quantile(clean, level))
+    peaks = clean[clean > init_threshold] - init_threshold
     if len(peaks) < 10:
-        return float(init_threshold)
+        return float(max(init_threshold, 0.05))
     
-    mean_peak = np.mean(peaks)
-    var_peak = np.var(peaks) + 1e-8
+    mean_peak = float(np.mean(peaks))
+    var_peak = float(np.var(peaks)) + 1e-8
     gamma = 0.5 * (((mean_peak ** 2) / var_peak) - 1)
     sigma = 0.5 * mean_peak * (((mean_peak ** 2) / var_peak) + 1)
     
-    n = len(scores)
+    n = len(clean)
     n_peaks = len(peaks)
     if gamma != 0:
         threshold = init_threshold + (sigma / gamma) * (((q * n / n_peaks) ** (-gamma)) - 1)
@@ -139,8 +209,8 @@ def compute_dynamic_pot_threshold(scores, q=1e-3, level=0.98):
         threshold = init_threshold - sigma * np.log(q * n / n_peaks)
         
     threshold = float(threshold)
-    p99 = float(np.quantile(scores, 0.99))
+    p99 = float(np.quantile(clean, 0.99))
     if threshold >= max_score or np.isnan(threshold) or threshold <= 0 or threshold > p99:
-        threshold = init_threshold if init_threshold <= p99 else p99
+        threshold = init_threshold if (init_threshold <= p99 and init_threshold > 0) else max(p99, 0.05)
         
-    return threshold
+    return float(threshold)
