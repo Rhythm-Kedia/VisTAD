@@ -3,12 +3,13 @@ import sys
 import time
 import numpy as np
 import torch
-import pandas as pd
 
-# Ensure workspace root is in path
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+
+for p in [CURRENT_DIR, ROOT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from src.models import build_student
 from src.dataset import select_top_k_channels
@@ -20,7 +21,8 @@ class VisTADServingEngine:
 
     AVAILABLE_MODELS = {
         "Universal Foundation (Zero-Shot Cross-Domain)": {
-            "path": "checkpoints/universal_multidomain_cnn_1d_best.pt",
+            "path": "universal_multidomain_cnn3.pt",
+            "aliases": ["universal_multidomain_cnn_1d_best.pt"],
             "k": 6,
             "arch": "cnn_1d",
             "layers": 3,
@@ -28,7 +30,8 @@ class VisTADServingEngine:
             "default_threshold": 0.20
         },
         "SMD Cloud Computing Expert": {
-            "path": "checkpoints/smd_pooled28_tcn_smd_pooled28_foundation_best.pt",
+            "path": "smd_pooled28_tcn_smd_pooled28_foundation_best.pt",
+            "aliases": ["smd_pooled28_foundation_tcn5.pt", "smd_pooled28_foundation_cnn3.pt"],
             "k": 6,
             "arch": "tcn",
             "layers": 5,
@@ -36,32 +39,34 @@ class VisTADServingEngine:
             "default_threshold": 0.20
         },
         "SWaT Water Treatment SCADA Expert": {
-            "path": "ablation_run_2/checkpoints/swat_swat_attack_tcn_backbone_tcn5_residual_swat_best.pt",
+            "path": "swat_swat_attack_tcn_loss_no_resp_swat_best.pt",
+            "aliases": ["swat_swat_attack_tcn_backbone_tcn5_residual_swat_best.pt", "swat_attack_residual_tcn5.pt"],
             "k": 6,
             "arch": "tcn",
             "layers": 5,
             "domain": "Industrial SCADA Control Systems (Residual-TCN 5L)",
-            "default_threshold": 0.1821
+            "default_threshold": 0.1750
         },
         "MSL Mars Rover Telemetry Expert": {
-            "path": "ablation_run_2/checkpoints/msl_msl_test_cnn_1d_msl_cnn3_best.pt",
+            "path": "msl_msl_test_tcn_loss_no_resp_msl_best.pt",
+            "aliases": ["msl_msl_test_tcn_filter_top_k_variance_msl_best.pt", "msl_msl_test_cnn_1d_backbone_cnn3_msl_best.pt"],
             "k": 6,
-            "arch": "cnn_1d",
-            "layers": 3,
-            "domain": "Aerospace Deep-Space Telemetry (CI 1D-CNN 3L)",
-            "default_threshold": 0.5215
+            "arch": "tcn",
+            "layers": 5,
+            "domain": "Aerospace Deep-Space Telemetry (Residual-TCN 5L)",
+            "default_threshold": 0.6500
         },
         "GECCO Water Quality Expert": {
-            "path": "ablation_run_2/checkpoints/gecco_gecco_water_cnn_1d_gecco_cnn3_best.pt",
+            "path": "gecco_gecco_water_cnn_1d_gecco_cnn3_best.pt",
+            "aliases": ["gecco_water_cnn3.pt", "gecco_gecco_water_cnn_1d_backbone_cnn3_gecco_best.pt"],
             "k": 9,
             "arch": "cnn_1d",
             "layers": 3,
             "domain": "Environmental / Water Quality (CI 1D-CNN 3L)",
-            "default_threshold": 0.1535
+            "default_threshold": 0.0620
         }
     }
 
-    # Backward compatibility aliases
     ALIASES = {
         "Universal Cross-Domain Foundation (SMD+SWaT+MSL+GECCO)": "Universal Foundation (Zero-Shot Cross-Domain)",
         "SMD Cloud Computing Foundation (28 Entities)": "SMD Cloud Computing Expert"
@@ -78,38 +83,40 @@ class VisTADServingEngine:
         self.model_info = None
 
     def load_model(self, model_name):
-        """Loads model checkpoint into memory with caching and robust root path resolution."""
-        # Resolve aliases
+        """Loads model checkpoint into memory with caching and robust path resolution."""
         model_name = self.ALIASES.get(model_name, model_name)
         
         if model_name not in self.AVAILABLE_MODELS:
             raise ValueError(f"Unknown model: {model_name}. Choose from: {list(self.AVAILABLE_MODELS.keys())}")
         
-        # Fast path: already loaded
         if self.current_model_name == model_name and self.current_model is not None:
             return True
             
         info = self.AVAILABLE_MODELS[model_name]
         raw_path = info["path"]
         
-        # Check multiple candidate locations
-        candidates = [
-            raw_path,
-            os.path.join(ROOT_DIR, raw_path),
-            os.path.join(ROOT_DIR, "checkpoints", os.path.basename(raw_path)),
-            os.path.join("checkpoints", os.path.basename(raw_path)),
-            os.path.join(ROOT_DIR, "ablation_run_2/checkpoints", os.path.basename(raw_path)),
-            os.path.join("ablation_run_2/checkpoints", os.path.basename(raw_path))
+        search_dirs = [
+            os.path.join(CURRENT_DIR, "checkpoints"),
+            os.path.join(ROOT_DIR, "checkpoints")
         ]
         
+        candidate_names = [raw_path, os.path.basename(raw_path)] + info.get("aliases", [])
+        
         ckpt_path = None
-        for cand in candidates:
-            if os.path.exists(cand):
-                ckpt_path = cand
-                break
+        if os.path.isabs(raw_path) and os.path.exists(raw_path):
+            ckpt_path = raw_path
+        else:
+            for sdir in search_dirs:
+                for fname in candidate_names:
+                    p = os.path.normpath(os.path.join(sdir, fname))
+                    if os.path.exists(p):
+                        ckpt_path = p
+                        break
+                if ckpt_path is not None:
+                    break
                 
         if ckpt_path is None:
-            raise FileNotFoundError(f"Checkpoint not found for '{model_name}'. Checked: {candidates}")
+            raise FileNotFoundError(f"Checkpoint not found for '{model_name}'.")
             
         model = build_student(
             name=info["arch"],
@@ -119,7 +126,7 @@ class VisTADServingEngine:
             dropout=0.0
         ).to(self.device)
         
-        state_dict = torch.load(ckpt_path, map_location=self.device)
+        state_dict = torch.load(ckpt_path, map_location=self.device, weights_only=True)
         model.load_state_dict(state_dict)
         model.eval()
         
@@ -130,7 +137,8 @@ class VisTADServingEngine:
 
     def process_telemetry(self, raw_data, window_size=200, stride=10, 
                           threshold_mode="pot", fixed_threshold=0.25, pot_q=1e-3,
-                          apply_smoothing=True, min_duration=3, merge_gap=10):
+                          apply_smoothing=True, min_duration=3, merge_gap=10,
+                          base_mean=None, base_std=None):
         """Runs end-to-end continuous inference and range-aware event localization."""
         if self.current_model is None:
             raise RuntimeError("No model loaded. Call load_model() first.")
@@ -146,16 +154,21 @@ class VisTADServingEngine:
         
         t0 = time.perf_counter()
         
-        # 1. Baseline normalization with minimum std floor (eliminates MSL 1e6 explosion)
-        bs_len = min(2000, n_steps)
-        base_m = np.mean(raw_arr[:bs_len], axis=0)
-        base_s = np.maximum(np.std(raw_arr[:bs_len], axis=0), 0.05)
+        # 1. Baseline normalization with minimum std floor
+        if base_mean is not None and base_std is not None:
+            base_m = np.asarray(base_mean, dtype=np.float32)
+            base_s = np.maximum(np.asarray(base_std, dtype=np.float32), 0.05)
+        else:
+            bs_len = min(2000, n_steps)
+            base_m = np.mean(raw_arr[:bs_len], axis=0)
+            base_s = np.maximum(np.std(raw_arr[:bs_len], axis=0), 0.05)
         
         # 2. Adaptive Channel Selection
+        force_0 = bool(self.current_model_name and "msl" in self.current_model_name.lower())
         if n_channels > k:
-            ctx = raw_arr[:min(800, n_steps)]
             selected_channels = select_top_k_channels(
-                raw_arr, base_m, base_s, ctx_data=ctx, strategy="median_shift", k=k
+                raw_arr, base_m, base_s, strategy="median_shift", k=k,
+                force_include_channel_0=force_0
             )
         else:
             selected_channels = list(range(n_channels))
@@ -172,9 +185,7 @@ class VisTADServingEngine:
             norm_data = np.pad(norm_data, ((0, window_size - n_steps), (0, 0)), mode="edge")
         else:
             starts = np.arange(0, n_steps - window_size + 1, stride)
-            if len(starts) == 0:
-                starts = np.array([0])
-            elif starts[-1] + window_size < n_steps:
+            if starts[-1] + window_size < n_steps:
                 starts = np.append(starts, n_steps - window_size)
             
         windows = np.array([norm_data[st:st + window_size].T for st in starts])  # [N, K, L]
@@ -195,9 +206,8 @@ class VisTADServingEngine:
                 for i, st in enumerate(b_starts):
                     end_idx = min(st + window_size, n_steps)
                     valid_len = end_idx - st
-                    if valid_len > 0:
-                        point_scores[st:end_idx] += dense_logits[i][:valid_len]
-                        point_counts[st:end_idx] += 1
+                    point_scores[st:end_idx] += dense_logits[i][:valid_len]
+                    point_counts[st:end_idx] += 1
                         
         t1 = time.perf_counter()
         

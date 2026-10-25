@@ -4,11 +4,7 @@ checkpoints/
 *.pth
 
 *.png
-temp_*.png
-
 data/
-data_repository/
-OneDrive_*/
 *.zip
 .DS_Store
 issues/
@@ -18,9 +14,8 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 .venv/
-venv/
 *.log
-*.ipynb
+# *.ipynb
 .ipynb_checkpoints/
 report/
 results/

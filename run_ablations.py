@@ -279,7 +279,7 @@ def main():
             with open(eval_json_path, "r") as f:
                 res = json.load(f)
             pm = res["point_metrics"]
-            aff_pot = res["affiliation_metrics_pot"]
+            aff_val = res.get("affiliation_metrics_val", res.get("affiliation_metrics_pot", {}))
             summary_rows.append({
                 "Experiment": exp["name"],
                 "Study": exp.get("study_type", args.study),
@@ -291,10 +291,11 @@ def main():
                 "AUROC": pm["auroc"],
                 "PR-AUC": pm["pr_auc"],
                 "Best Point F1": pm["best_f1"],
-                "POT Precision": pm["precision"],
-                "POT Recall": pm["recall"],
-                "Affiliation F1": aff_pot["aff_f1"],
-                "Mean Temporal IoU": aff_pot["mean_tiou"],
+                "Val Threshold": res.get("tau_star_threshold", res.get("active_threshold", 0.5)),
+                "Val Precision": aff_val.get("aff_precision", pm.get("precision", 0.0)),
+                "Val Recall": aff_val.get("aff_recall", pm.get("recall", 0.0)),
+                "Affiliation F1": aff_val.get("aff_f1", 0.0),
+                "Mean Temporal IoU": aff_val.get("mean_tiou", 0.0),
                 "Latency (ms/win)": res["latency_ms_per_window"],
                 "Params": res["parameters"]
             })

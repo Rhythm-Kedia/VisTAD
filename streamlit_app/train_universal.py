@@ -1,14 +1,16 @@
 import os
 import sys
-import glob
-import re
 import argparse
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 
-# Ensure workspace root is in path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+
+for p in [CURRENT_DIR, ROOT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from src.dataset import TimeSeriesDataset, load_dataset_arrays
 from src.models import build_student
@@ -31,7 +33,7 @@ def main():
     parser.add_argument("--k", type=int, default=6, help="Top-K channels (default: 6)")
     parser.add_argument("--w", type=int, default=200, help="Window size")
     parser.add_argument("--stride", type=int, default=100, help="Sliding stride")
-    parser.add_argument("--output_ckpt", type=str, default="checkpoints/universal_multidomain_cnn_1d_best.pt")
+    parser.add_argument("--output_ckpt", type=str, default=os.path.join(ROOT_DIR, "checkpoints", "universal_multidomain_cnn_1d_best.pt"))
     args = parser.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -51,12 +53,14 @@ def main():
     val_datasets = []
     
     total_cached_windows = 0
+    data_dir = os.path.join(ROOT_DIR, "data")
+    cache_dir = os.path.join(ROOT_DIR, "cache")
 
     for dom in domains:
         ds_name = dom["dataset"]
         for ent in dom["entities"]:
             try:
-                raw_data, labels = load_dataset_arrays(ds_name, ent, "data")
+                raw_data, labels = load_dataset_arrays(ds_name, ent, data_dir)
                 (tr_x, tr_y), (va_x, va_y), (te_x, te_y) = split_series(raw_data, labels)
                 
                 bs_steps = min(3000, len(tr_x))
@@ -64,10 +68,10 @@ def main():
                 # Enforce minimum std floor to eliminate 1e6 division blowup on discrete channels
                 base_s = np.maximum(np.std(tr_x[:bs_steps], axis=0), 0.05)
 
-                cache_path = os.path.join("cache", f"{ds_name}_{ent}_teacher_cache.pt")
+                cache_path = os.path.join(cache_dir, f"{ds_name}_{ent}_teacher_cache.pt")
                 teacher_cache = None
                 if os.path.exists(cache_path):
-                    teacher_cache = torch.load(cache_path, weights_only=False)
+                    teacher_cache = torch.load(cache_path, weights_only=True)
                     usable = sum(1 for st in teacher_cache if st + args.w <= len(tr_x))
                     total_cached_windows += usable
                     print(f"  [{ds_name.upper():<5} - {ent:<12}] Train: {len(tr_x):<7} | Usable Teacher Anchors: {usable}")

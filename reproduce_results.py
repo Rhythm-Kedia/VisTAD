@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """
-VisTAD Results Reproduction Engine
-====================================
-Authors: Rhythm Kedia (24B1071) & Ganga Shreyas (24B0999)
-Course: IIT Bombay - IE 643 (Deep Learning: Theory & Practice)
+VisTAD Results Reproduction
 
-This script evaluates trained model checkpoints and teacher cache files directly,
-generating the benchmark numbers from scratch:
+This script evaluates trained model checkpoints and teacher cache files
   - Table 3: Teacher vs. Student Head-to-Head Evaluation (Held-Out Test Windows)
-  - Table 4: Continuous-Stream Timeline Evaluation (Sliding Window & POT Thresholding)
-  - Table 5: Student Backbone Architecture Study (Dilated CNN, Residual TCN, BiLSTM, TimesNet)
+  - Table 4: Continuous-Stream Timeline Evaluation (Sliding Window & Validation Thresholding)
+  - Table 5: Student Backbone Architecture Study (CI 1D-CNN vs. Residual TCN)
   - Table 6: Distillation Loss Objective Dissection (Full VisTAD vs. Component Ablations)
   - Table 7: Channel Filtering Strategy Sensitivity (Median Shift, Variance, Z-Score, None)
-  - Table 8: SMD Foundation Entity Scaling (Single Machine vs. 28-Entity Foundation Student)
-  - Table 9: Operational Edge Profile (Latency, Parameters, Memory Footprint, Compression)
+  - Table 8: Operational Edge Profile (Latency, Parameters, Memory Footprint, Compression)
 
 Usage:
-  ~/.venv/bin/python reproduce_results.py [--table 3,4,8,9] [--device mps|cuda|cpu] [--stride 10]
+  ~/.venv/bin/python reproduce_results.py [--table 3,4,5,6,7,8] [--device mps|cuda|cpu] [--stride 10]
 """
 
 import os
@@ -94,8 +89,12 @@ def eval_binary_scores(y_true, scores, default_thresh=0.5):
 
 def find_checkpoint(patterns):
     search_dirs = [
-        "ablation_run_2/checkpoints",
         "checkpoints",
+        "../checkpoints",
+        "../../checkpoints",
+        "ablation_run_2/checkpoints",
+        "../ablation_run_2/checkpoints",
+        "../../ablation_run_2/checkpoints",
         "ablation_run/extracted/checkpoints"
     ]
     for d in search_dirs:
@@ -110,7 +109,7 @@ def find_checkpoint(patterns):
 
 
 class ReproductionEngine:
-    def __init__(self, device=None, cache_dir="data_repository/cache", stride=10, output_dir="results/reproduced"):
+    def __init__(self, device=None, cache_dir="cache", stride=10, output_dir="results/reproduced"):
         if device:
             self.device = device
         elif torch.cuda.is_available():
@@ -306,12 +305,12 @@ class ReproductionEngine:
         print(f"\n{BOLD}{CYAN}=== Generating Table 4: Continuous-Stream Timeline Evaluation ==={RESET}")
         
         benchmarks = [
-            {"name": "SMD (machine-1-1 stream)", "dataset": "smd", "entity": "machine-1-1", "k": 6, "arch": "cnn_1d", "layers": 3,
-             "ckpt": ["smd_pooled28_cnn_1d_foundation_pooled28_best.pt", "smd_*cnn_1d*best.pt"]},
-            {"name": "SWaT", "dataset": "swat", "entity": "swat_attack", "k": 6, "arch": "cnn_1d", "layers": 3,
-             "ckpt": ["swat_swat_attack_cnn_1d_swat_cnn3_best.pt", "swat_*cnn_1d*best.pt"]},
-            {"name": "MSL", "dataset": "msl", "entity": "msl_test", "k": 6, "arch": "cnn_1d", "layers": 3,
-             "ckpt": ["msl_msl_test_cnn_1d_msl_cnn3_best.pt", "msl_*cnn_1d*best.pt"]},
+            {"name": "SMD (machine-1-1 stream)", "dataset": "smd", "entity": "machine-1-1", "k": 6, "arch": "tcn", "layers": 5,
+             "ckpt": ["smd_pooled28_tcn_loss_no_resp_smd_best.pt", "smd_*loss_no_resp*best.pt", "smd_pooled28_cnn_1d_foundation_pooled28_best.pt"]},
+            {"name": "SWaT", "dataset": "swat", "entity": "swat_attack", "k": 6, "arch": "tcn", "layers": 5,
+             "ckpt": ["swat_swat_attack_tcn_swat_tcn5_best.pt", "swat_*tcn5*best.pt", "swat_*tcn*best.pt"]},
+            {"name": "MSL", "dataset": "msl", "entity": "msl_test", "k": 6, "arch": "tcn", "layers": 5,
+             "ckpt": ["msl_msl_test_tcn_msl_tcn5_best.pt", "msl_*tcn5*best.pt", "msl_*tcn*best.pt"]},
             {"name": "GECCO", "dataset": "gecco", "entity": "gecco_water", "k": 9, "arch": "cnn_1d", "layers": 3,
              "ckpt": ["gecco_gecco_water_cnn_1d_gecco_cnn3_best.pt", "gecco_*cnn_1d*best.pt"]}
         ]
@@ -338,7 +337,7 @@ class ReproductionEngine:
 
             bs_steps = 5000 if ds == "swat" else 3000
             base_m = np.mean(raw_data[:bs_steps], axis=0)
-            base_s = np.maximum(np.std(raw_data[:bs_steps], axis=0), 0.05)
+            base_s = np.std(raw_data[:min(bs_steps, len(raw_data))], axis=0) + 1e-6
 
             num_channels = raw_data.shape[1]
             in_ch = k if num_channels > k else num_channels
@@ -636,61 +635,9 @@ class ReproductionEngine:
         self._save_table_artifacts("table7_channel_filtering", headers, rows)
         return headers, rows
 
-    def run_table8_smd_scaling(self):
-        """Table 8: SMD Foundation Scaling."""
-        print(f"\n{BOLD}{CYAN}=== Generating Table 8: SMD Foundation Scaling ==={RESET}")
-        
-        scopes = [
-            {"name": "Single machine (machine-1-1 only)", "ckpt": ["smd_machine-1-1_tcn_smd_single_m1_1_best.pt", "*single*best.pt"]},
-            {"name": "Pooled Foundation (28 entities)", "ckpt": ["smd_pooled28_tcn_smd_pooled28_foundation_best.pt", "*foundation*best.pt"]}
-        ]
-
-        headers = ["Training Scope", "AUROC", "PR-AUC", "Best-F1", "Affiliation-F1"]
-        rows = []
-
-        raw_data, labels = load_dataset_arrays("smd", "machine-1-1", "data")
-        n_total = len(raw_data)
-        val_start = int(n_total * 0.5)
-        test_start = int(n_total * 0.6)
-        raw_val, lab_val = raw_data[val_start:test_start], labels[val_start:test_start]
-        raw_test, lab_test = raw_data[test_start:], labels[test_start:]
-
-        base_m = np.mean(raw_data[:3000], axis=0)
-        base_s = np.maximum(np.std(raw_data[:3000], axis=0), 0.05)
-
-        for sc in scopes:
-            ckpt = find_checkpoint(sc["ckpt"])
-            if not ckpt:
-                continue
-
-            model = build_student("tcn", in_channels=6, hidden_dim=128, num_layers=5).to(self.device)
-            model.load_state_dict(torch.load(ckpt, map_location=self.device))
-            model.eval()
-
-            val_scores = self._score_stream(model, raw_val, lab_val, base_m, base_s, 38, 6)
-            tau_star = self._calibrate_tau_star(val_scores, lab_val)
-
-            cont = self._score_stream(model, raw_test, lab_test, base_m, base_s, 38, 6)
-            pm = compute_point_metrics(lab_test, cont, threshold=tau_star)
-            am = compute_affiliation_metrics(lab_test, (cont >= tau_star).astype(int), smooth=False)
-
-            row = [
-                sc["name"],
-                f"{pm['auroc']:.3f}",
-                f"{pm['pr_auc']:.3f}",
-                f"{pm['best_f1']:.3f}",
-                f"{am['aff_f1']:.3f}"
-            ]
-            rows.append(row)
-
-        table_str = format_table(headers, rows)
-        print("\n" + table_str)
-        self._save_table_artifacts("table8_smd_scaling", headers, rows)
-        return headers, rows
-
-    def run_table9_operational_profile(self):
-        """Table 9: Operational Edge Profile."""
-        print(f"\n{BOLD}{CYAN}=== Generating Table 9: Operational Profile ==={RESET}")
+    def run_table8_operational_profile(self):
+        """Table 8: Operational Edge Profile."""
+        print(f"\n{BOLD}{CYAN}=== Generating Table 8: Operational Profile ==={RESET}")
         
         # Instantiate student model and benchmark inference on current device
         student = build_student("cnn_1d", in_channels=6, hidden_dim=128, num_layers=3).to(self.device)
@@ -734,19 +681,19 @@ class ReproductionEngine:
 
         table_str = format_table(headers, rows)
         print("\n" + table_str)
-        self._save_table_artifacts("table9_operational_profile", headers, rows)
+        self._save_table_artifacts("table8_operational_profile", headers, rows)
         return headers, rows
 
 
 def main():
     parser = argparse.ArgumentParser(description="VisTAD Benchmark Reproduction Engine")
     parser.add_argument("--table", type=str, default="all",
-                        help="Comma-separated list of tables to generate (e.g., '3,4,8,9' or 'all')")
+                        help="Comma-separated list of tables to generate (e.g., '3,4,5,6,7,8' or 'all')")
     parser.add_argument("--device", type=str, default=None, choices=["cpu", "mps", "cuda"],
                         help="Target device for evaluation")
     parser.add_argument("--stride", type=int, default=10,
                         help="Stride for continuous timeline sliding-window evaluation (default: 10)")
-    parser.add_argument("--cache_dir", type=str, default="data_repository/cache",
+    parser.add_argument("--cache_dir", type=str, default="cache",
                         help="Path to cached teacher outputs")
     parser.add_argument("--output_dir", type=str, default="results/reproduced",
                         help="Output directory to save reproduced results")
@@ -775,9 +722,7 @@ def main():
     if should_run(7):
         engine.run_table7_channel_filtering()
     if should_run(8):
-        engine.run_table8_smd_scaling()
-    if should_run(9):
-        engine.run_table9_operational_profile()
+        engine.run_table8_operational_profile()
 
     print(f"\n{BOLD}{GREEN}Complete numerical reproduction finished successfully!{RESET}\n")
 

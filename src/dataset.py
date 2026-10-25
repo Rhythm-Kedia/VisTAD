@@ -1,5 +1,4 @@
 import os
-import glob
 import numpy as np
 import pandas as pd
 import torch
@@ -132,64 +131,43 @@ class TimeSeriesDataset(Dataset):
         return sample
 
 
+ENTITY_FILES = {
+    ("swat", "swat_attack"): "SWaT_Dataset_Attack_v0.csv",
+    ("swat", "swat_normal"): "SWaT_Dataset_Normal_v1.csv",
+    ("msl", "msl_test"): "msl_test.csv",
+    ("msl", "msl_train"): "msl_train.csv",
+    ("gecco", "gecco_water"): "gecco_water.csv",
+}
+
+
 def load_dataset_arrays(dataset_name="smd", entity="machine-1-1", data_dir="data"):
     """Loads raw train/test arrays for supported datasets."""
-    paths_to_check = [
-        os.path.join(data_dir, dataset_name),
-        os.path.join("data", dataset_name),
-        os.path.join("datasets", dataset_name),
-        os.path.join("..", "datasets", dataset_name),
-        os.path.join("/kaggle/input", dataset_name),
-    ]
-    
-    if os.path.exists("/kaggle/input"):
-        for root, dirs, files in os.walk("/kaggle/input"):
-            if os.path.basename(root).lower() == dataset_name.lower():
-                paths_to_check.append(root)
-            elif "test" in dirs and "test_label" in dirs:
-                paths_to_check.append(root)
-                
-    target_dir = None
-    for p in paths_to_check:
-        if os.path.exists(p):
-            target_dir = p
-            break
-            
-    if target_dir is None:
-        raise FileNotFoundError(
-            f"Could not locate dataset '{dataset_name}' in any checked paths: {paths_to_check}. "
-            f"On Kaggle, ensure the dataset is attached under /kaggle/input/ or in the project directory."
-        )
-            
+    target_dir = os.path.join(data_dir, dataset_name)
+    if not os.path.exists(target_dir):
+        for candidate_root in [
+            os.path.join(os.path.dirname(__file__), "..", "data"),
+            os.path.join(os.path.dirname(__file__), "..", "..", "data"),
+        ]:
+            cand = os.path.abspath(os.path.join(candidate_root, dataset_name))
+            if os.path.exists(cand):
+                target_dir = cand
+                break
+        else:
+            raise FileNotFoundError(f"Could not locate dataset directory for '{dataset_name}' at '{target_dir}'.")
+
     if dataset_name == "smd":
         test_file = os.path.join(target_dir, "test", f"{entity}.txt")
         label_file = os.path.join(target_dir, "test_label", f"{entity}.txt")
         test_df = pd.read_csv(test_file, header=None)
         test_labels = pd.read_csv(label_file, header=None)[0].values
         return test_df.values, test_labels
-    else:
-        csv_path = os.path.join(target_dir, f"{entity}.csv")
-        if not os.path.exists(csv_path):
-            candidates = glob.glob(os.path.join(target_dir, "*.csv"))
-            for c in candidates:
-                base = os.path.splitext(os.path.basename(c))[0].lower()
-                ent_lower = entity.lower().replace("-", "_")
-                if base == ent_lower or ent_lower in base or base in ent_lower:
-                    csv_path = c
-                    break
-                ent_tokens = set(ent_lower.split("_"))
-                base_tokens = set(base.split("_"))
-                if "attack" in ent_tokens and "attack" in base_tokens:
-                    csv_path = c
-                    break
-                if "normal" in ent_tokens and "normal" in base_tokens:
-                    csv_path = c
-                    break
-            if not os.path.exists(csv_path) and len(candidates) == 1:
-                csv_path = candidates[0]
-        if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"Could not locate CSV file for entity '{entity}' in {target_dir}")
-        df = pd.read_csv(csv_path)
-        labels = df["attack"].values if "attack" in df.columns else np.zeros(len(df))
-        data = df.drop(columns=[c for c in ["attack", "label", "timestamp"] if c in df.columns]).values
-        return data, labels
+
+    fname = ENTITY_FILES.get((dataset_name, entity), f"{entity}.csv")
+    csv_path = os.path.join(target_dir, fname)
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Could not locate CSV file for entity '{entity}' at '{csv_path}'.")
+
+    df = pd.read_csv(csv_path)
+    labels = df["attack"].values if "attack" in df.columns else np.zeros(len(df))
+    data = df.drop(columns=[c for c in ["attack", "label", "timestamp"] if c in df.columns]).values
+    return data, labels

@@ -6,12 +6,15 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# Ensure workspace root is in path
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 
-from streamlit_app.serving import VisTADServingEngine
+for p in [CURRENT_DIR, ROOT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from serving import VisTADServingEngine
+
 from src.dataset import load_dataset_arrays
 from src.metrics import (
     find_events, 
@@ -100,6 +103,8 @@ def main():
 
     raw_data = None
     ground_truth = None
+    clean_base_m = None
+    clean_base_s = None
     time_index = None
     dataset_name = ""
     feature_names = []
@@ -184,19 +189,19 @@ def main():
         preset_configs = {
             "SMD Cloud Computing Server (Crash Incident)": {
                 "ds": "smd", "entity": "machine-1-1", "start": 15000, "len": 3000,
-                "model": "SMD Cloud Computing Expert"
+                "model": "SMD Cloud Computing Expert", "sample_file": "test_server_smd.csv"
             },
             "SWaT Water Treatment SCADA (Attack Intervals)": {
-                "ds": "swat", "entity": "swat_attack", "start": 1000, "len": 3000,
-                "model": "SWaT Water Treatment SCADA Expert"
+                "ds": "swat", "entity": "swat_attack", "start": 1500, "len": 3000,
+                "model": "SWaT Water Treatment SCADA Expert", "sample_file": "test_swat_water_scada.csv"
             },
             "MSL Mars Rover (Telemetry Anomaly)": {
-                "ds": "msl", "entity": "msl_test", "start": 45000, "len": 3000,
-                "model": "MSL Mars Rover Telemetry Expert"
+                "ds": "msl", "entity": "msl_test", "start": 27000, "len": 3000,
+                "model": "MSL Mars Rover Telemetry Expert", "sample_file": "test_spacecraft_msl.csv"
             },
             "GECCO Drinking Water (Chemical Drift)": {
-                "ds": "gecco", "entity": "gecco_water", "start": 15500, "len": 2500,
-                "model": "GECCO Water Quality Expert"
+                "ds": "gecco", "entity": "gecco_water", "start": 60000, "len": 2500,
+                "model": "GECCO Water Quality Expert", "sample_file": "test_gecco_water.csv"
             }
         }
         preset_choice = st.sidebar.selectbox("Choose Benchmark Dataset:", list(preset_configs.keys()))
@@ -208,6 +213,10 @@ def main():
         slice_len = st.sidebar.slider("Evaluation Window Length (steps):", 1000, 5000, cfg["len"], 500)
 
         data_dir = os.path.join(ROOT_DIR, "data")
+        raw_data = None
+        ground_truth = None
+        clean_base_m = None
+        clean_base_s = None
         try:
             full_raw, full_labels = load_dataset_arrays(cfg["ds"], cfg["entity"], data_dir)
             st_idx = cfg["start"]
@@ -216,6 +225,10 @@ def main():
             ground_truth = full_labels[st_idx:ed_idx]
             time_index = np.arange(len(raw_data))
             feature_names = [f"Ch {i}" for i in range(raw_data.shape[1])]
+            
+            bs_steps = min(3000, len(full_raw))
+            clean_base_m = np.mean(full_raw[:bs_steps], axis=0)
+            clean_base_s = np.maximum(np.std(full_raw[:bs_steps], axis=0), 0.05)
         except Exception as e:
             st.error(f"Error loading benchmark dataset '{preset_choice}': {e}")
             return
@@ -283,7 +296,9 @@ def main():
         fixed_threshold=operating_tau,
         apply_smoothing=apply_smoothing,
         min_duration=min_dur,
-        merge_gap=merge_gap
+        merge_gap=merge_gap,
+        base_mean=clean_base_m,
+        base_std=clean_base_s
     )
 
     scores = results["continuous_scores"]
@@ -535,7 +550,8 @@ def main():
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     fig.update_yaxes(title_text="Sensor (std)", row=1, col=1)
-    fig.update_yaxes(title_text="Score", row=2, col=1, range=[0, max(1.0, float(np.max(scores) * 1.15))])
+    score_top = max(operating_tau * 1.5, float(np.max(scores) * 1.25), 0.25)
+    fig.update_yaxes(title_text="Score", row=2, col=1, range=[0, min(1.05, score_top)])
     fig.update_xaxes(title_text="Timestep", row=num_rows, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
