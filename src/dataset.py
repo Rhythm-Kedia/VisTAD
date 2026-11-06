@@ -62,12 +62,15 @@ class TimeSeriesDataset(Dataset):
     
     def __init__(self, data, labels, window_size=200, stride=100, 
                  base_mean=None, base_std=None, filter_strategy="none", k=6,
-                 teacher_cache=None):
+                 teacher_cache=None, normalize=True, force_include_channel_0=False,
+                 include_all_cached=True):
         self.window_size = window_size
         self.stride = stride
         self.filter_strategy = filter_strategy
         self.k = k
         self.teacher_cache = teacher_cache
+        self.normalize = normalize
+        self.force_include_channel_0 = force_include_channel_0
         
         self.data = np.asarray(data, dtype=np.float32)
         self.labels = np.asarray(labels, dtype=np.float32) if labels is not None else np.zeros(len(data), dtype=np.float32)
@@ -77,7 +80,14 @@ class TimeSeriesDataset(Dataset):
         self.base_std = np.maximum(raw_std, 0.05)  # Enforce minimum std to prevent 1e6 division blowup on constant/binary channels
         
         total_len = len(self.data)
-        self.indices = [i for i in range(0, total_len - window_size + 1, stride)]
+        uniform_indices = [i for i in range(0, total_len - window_size + 1, stride)]
+        
+        # Include cached windows so teacher distillation is active on curriculum windows
+        if include_all_cached and self.teacher_cache is not None:
+            cached_in_bounds = [st for st in self.teacher_cache.keys() if st + window_size <= total_len]
+            self.indices = sorted(list(set(uniform_indices) | set(cached_in_bounds)))
+        else:
+            self.indices = uniform_indices
         
     def __len__(self):
         return len(self.indices)
@@ -94,8 +104,13 @@ class TimeSeriesDataset(Dataset):
             ctx_data = self.data[ctx_start:start] if start > 0 else None
             active_dims = select_top_k_channels(window_x, self.base_mean, self.base_std, 
                                                 ctx_data=ctx_data,
-                                                strategy=self.filter_strategy, k=self.k)
+                                                strategy=self.filter_strategy, k=self.k,
+                                                force_include_channel_0=self.force_include_channel_0)
             window_x = window_x[:, active_dims]
+            if self.normalize:
+                window_x = (window_x - self.base_mean[active_dims]) / self.base_std[active_dims]
+        elif self.normalize:
+            window_x = (window_x - self.base_mean) / self.base_std
             
         gt_ratio = float(np.mean(window_y))
         gt_flag = 1.0 if np.any(window_y >= 0.5) else 0.0

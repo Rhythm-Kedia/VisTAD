@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument("--w_feat", type=float, default=None, help="Latent feature distillation weight")
     parser.add_argument("--w_resp", type=float, default=None, help="Soft response distillation weight")
     parser.add_argument("--pos_weight", type=float, default=None, help="BCE loss positive class multiplier")
+    parser.add_argument("--loss_type", type=str, default=None, choices=["bce", "focal", "dice", "tv", "rank", "hybrid"], help="Loss formulation type")
     parser.add_argument("--decision_threshold", type=float, default=None, help="Calibrated threshold for response loss")
     parser.add_argument("--tag", type=str, default=None, help="Experiment variant tag for checkpoint naming")
     parser.add_argument("--train_frac", type=float, default=0.5, help="Chronological fraction used for training")
@@ -212,11 +213,13 @@ def main():
         teacher_feat_dim=cfg["student"].get("teacher_feat_dim", 2048)
     )
     
+    loss_type = args.loss_type if args.loss_type is not None else cfg["training"].get("loss_type", "hybrid")
     loss_fn = MultiObjectiveKDLoss(
         w_sup=lw["w_sup"], w_feat=lw["w_feat"], w_resp=lw["w_resp"],
         temperature=cfg["training"].get("temperature", 2.0),
         decision_threshold=cfg["teacher"].get("decision_threshold", 0.63),
-        pos_weight=pos_weight
+        pos_weight=pos_weight,
+        loss_type=loss_type
     )
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=cfg["training"]["lr"],
                                   weight_decay=cfg["training"].get("weight_decay", 1e-4))

@@ -3,14 +3,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ResidualDilatedBlock(nn.Module):
-    """Residual dilated conv block for long-range temporal receptive fields."""
-    def __init__(self, in_channels, out_channels, dilation, dropout=0.1):
+class CausalConvLayer(nn.Module):
+    """Standard conv layer with causal lookback slice to preserve length L."""
+    def __init__(self, in_channels, out_channels, dilation=1, dropout=0.1, causal=True):
         super().__init__()
-        padding = 2 * dilation
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=5, padding=padding, dilation=dilation)
+        self.causal = causal
+        pad = 4 * dilation if causal else 2 * dilation
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=5, padding=pad, dilation=dilation)
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        L = x.shape[-1]
+        h = self.conv(x)
+        if self.causal:
+            h = h[:, :, :L]
+        return self.drop(self.act(self.bn(h)))
+
+
+class ResidualDilatedBlock(nn.Module):
+    """Residual dilated conv block with causal temporal receptive fields."""
+    def __init__(self, in_channels, out_channels, dilation, dropout=0.1, causal=True):
+        super().__init__()
+        self.dilation = dilation
+        self.causal = causal
+        pad = 4 * dilation if causal else 2 * dilation
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=5, padding=pad, dilation=dilation)
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=5, padding=padding, dilation=dilation)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=5, padding=pad, dilation=dilation)
         self.bn2 = nn.BatchNorm1d(out_channels)
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout)
@@ -18,8 +39,16 @@ class ResidualDilatedBlock(nn.Module):
 
     def forward(self, x):
         res = self.skip(x)
-        h = self.drop(self.act(self.bn1(self.conv1(x))))
-        h = self.drop(self.bn2(self.conv2(h)))
+        L = x.shape[-1]
+        h = self.conv1(x)
+        if self.causal:
+            h = h[:, :, :L]
+        h = self.drop(self.act(self.bn1(h)))
+        
+        h = self.conv2(h)
+        if self.causal:
+            h = h[:, :, :L]
+        h = self.drop(self.bn2(h))
         return self.act(h + res)
 
 
@@ -32,12 +61,13 @@ class CNN1DStudent(nn.Module):
     """
     
     def __init__(self, in_channels=6, hidden_dim=128, num_layers=3, dropout=0.1,
-                 teacher_feat_dim=2048, channel_independent=True, use_residual=False):
+                 teacher_feat_dim=2048, channel_independent=True, use_residual=False, causal=True):
         super().__init__()
         self.in_channels = in_channels
         self.hidden_dim = hidden_dim
         self.channel_independent = channel_independent
         self.use_residual = use_residual
+        self.causal = causal
         
         curr_in = 1 if channel_independent else in_channels
         
@@ -46,7 +76,7 @@ class CNN1DStudent(nn.Module):
             for i in range(num_layers):
                 d = 2 ** i
                 self.res_blocks.append(
-                    ResidualDilatedBlock(curr_in, hidden_dim, dilation=d, dropout=dropout)
+                    ResidualDilatedBlock(curr_in, hidden_dim, dilation=d, dropout=dropout, causal=causal)
                 )
                 curr_in = hidden_dim
             self.backbone = None
@@ -54,12 +84,9 @@ class CNN1DStudent(nn.Module):
             layers = []
             for i in range(num_layers):
                 d = 2 ** i
-                layers.extend([
-                    nn.Conv1d(curr_in, hidden_dim, kernel_size=5, padding=2 * d, dilation=d),
-                    nn.BatchNorm1d(hidden_dim),
-                    nn.GELU(),
-                    nn.Dropout(dropout)
-                ])
+                layers.append(
+                    CausalConvLayer(curr_in, hidden_dim, dilation=d, dropout=dropout, causal=causal)
+                )
                 curr_in = hidden_dim
             self.backbone = nn.Sequential(*layers)
             self.res_blocks = None
@@ -91,11 +118,12 @@ class CNN1DStudent(nn.Module):
             # Permutation-invariant aggregation across channels: max anomaly probability
             dense_probs = torch.max(dense_per_chan, dim=1)[0]
             
-            # Multi-scale anomaly pooling (captures both transient spikes and sustained shifts)
+            # Multi-scale morphology-aware anomaly pooling (spikes + sustained shifts/plateaus)
             max_p = torch.max(dense_probs, dim=1)[0]
             k_pool = min(10, L)
             top_p = torch.topk(dense_probs, k=k_pool, dim=1)[0].mean(dim=1)
-            score_scalar = 0.6 * max_p + 0.4 * top_p
+            mean_p = torch.mean(dense_probs, dim=1)
+            score_scalar = 0.4 * max_p + 0.3 * top_p + 0.3 * mean_p
             
             # Feature representation pooled over time and channels
             h_pooled = torch.mean(h_ci.reshape(B, K, -1, L).mean(dim=1), dim=-1)
@@ -114,7 +142,8 @@ class CNN1DStudent(nn.Module):
             max_p = torch.max(dense_probs, dim=1)[0]
             k_pool = min(10, dense_probs.shape[1])
             top_p = torch.topk(dense_probs, k=k_pool, dim=1)[0].mean(dim=1)
-            score_scalar = 0.6 * max_p + 0.4 * top_p
+            mean_p = torch.mean(dense_probs, dim=1)
+            score_scalar = 0.4 * max_p + 0.3 * top_p + 0.3 * mean_p
             
             h_pooled = torch.mean(h, dim=-1)
             proj_feat = self.feat_projector(h_pooled)
