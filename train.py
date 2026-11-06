@@ -21,6 +21,7 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default=None, help="Dataset name (smd, swat, msl, gecco) (overrides config)")
     parser.add_argument("--entity", type=str, default=None, help="Target entity name or 'all' for pooled training")
     parser.add_argument("--cache_dir", type=str, default=None, help="Custom teacher cache directory")
+    parser.add_argument("--cache_file", type=str, default=None, help="Direct path to teacher cache file")
     parser.add_argument("--arch", type=str, default=None, help="Student backbone (cnn_1d, tcn, timesnet, bilstm)")
     parser.add_argument("--num_layers", type=int, default=None, help="Backbone depth / number of layers")
     parser.add_argument("--epochs", type=int, default=None, help="Training epochs")
@@ -168,12 +169,19 @@ def main():
 
         (tr_x, tr_y), (va_x, va_y), (te_x, te_y) = split_series(raw_data, labels, args.train_frac, args.val_frac)
 
-        cache_path = os.path.join(cache_dir, f"{name}_{ent}_teacher_cache.pt")
+        cache_path = args.cache_file
+        if not cache_path or not os.path.exists(cache_path):
+            candidates = [
+                os.path.join(cache_dir, f"{name}_{ent}_teacher_cache.pt"),
+                os.path.join(cache_dir, f"{name}_{ent}_vlm4ts_cache.pt"),
+            ]
+            cache_path = next((c for c in candidates if os.path.exists(c)), candidates[0])
+
         teacher_cache = None
         if os.path.exists(cache_path):
             teacher_cache = torch.load(cache_path, weights_only=False)
             usable = sum(1 for st in teacher_cache if st + w <= len(tr_x))
-            print(f"[{ent}] cache: {len(teacher_cache)} windows ({usable} in train slice)")
+            print(f"[{ent}] cache loaded from {cache_path}: {len(teacher_cache)} windows ({usable} in train slice)")
         else:
             print(f"[{ent}] WARNING: no teacher cache at {cache_path}")
 
