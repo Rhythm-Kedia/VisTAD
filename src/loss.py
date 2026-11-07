@@ -173,3 +173,38 @@ class MultiObjectiveKDLoss(nn.Module):
         losses["loss_total"] = total_loss
         return total_loss, losses
 
+
+class SimplifiedDistillationLoss(nn.Module):
+    """Clean 2-term distillation loss without response-matching distortion:
+    L_total = (L_Focal + L_Dice) + alpha * L_Feat
+    where L_Feat is cosine distance between student 1024-dim embedding and DINOv2-Large feature.
+    """
+    def __init__(self, alpha=0.1, gamma=2.0, pos_weight=2.0):
+        super().__init__()
+        self.alpha = float(alpha)
+        self.focal = FocalBCELoss(gamma=gamma, pos_weight=pos_weight)
+        self.dice = TemporalDiceLoss()
+
+    def forward(self, pred_dense, target_dense, student_feat=None, teacher_feat=None, y_flag=None):
+        l_focal = self.focal(pred_dense, target_dense)
+        l_dice = self.dice(pred_dense, target_dense, y_flag=y_flag)
+        l_seg = l_focal + l_dice
+
+        if student_feat is not None and teacher_feat is not None:
+            s_norm = F.normalize(student_feat, p=2, dim=-1)
+            t_norm = F.normalize(teacher_feat, p=2, dim=-1)
+            sim = torch.sum(s_norm * t_norm, dim=-1)
+            l_feat = torch.mean(1.0 - sim)
+        else:
+            l_feat = torch.tensor(0.0, device=pred_dense.device)
+
+        total_loss = l_seg + self.alpha * l_feat
+        return total_loss, {
+            "loss_total": float(total_loss.item()),
+            "loss_focal": float(l_focal.item()),
+            "loss_dice": float(l_dice.item()),
+            "loss_seg": float(l_seg.item()),
+            "loss_feat": float(l_feat.item())
+        }
+
+

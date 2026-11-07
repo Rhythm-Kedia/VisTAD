@@ -1,5 +1,7 @@
 import io
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 from PIL import Image
@@ -120,9 +122,9 @@ def render_vlm4ts_image(data, start_idx, end_idx, dims, base_mean=None, base_std
         ax_micro_d.set_xlabel("Time Step in Window", fontsize=8)
         ax_micro_d.grid(True, linestyle=":", alpha=0.4)
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0.05)
+    # Direct Agg canvas memory buffer extraction bypassing PNG compression
+    fig.canvas.draw()
+    rgba = np.asarray(fig.canvas.buffer_rgba())
+    img = Image.fromarray(rgba[:, :, :3])
     plt.close(fig)
-    buf.seek(0)
-    img = Image.open(buf).convert("RGB")
     return img
