@@ -93,12 +93,17 @@ class SyntheticAnomalyGenerator:
 class UniversalWindowDataset(Dataset):
     """Sliding-window dataset for an arbitrary C-channel multivariate time series."""
     def __init__(self, data: np.ndarray, labels: np.ndarray = None, window_size: int = 200, 
-                 stride: int = 10, augment_synthetic: bool = False, seed: int = 42):
+                 stride: int = 10, augment_synthetic: bool = False, 
+                 subsample_channels_range: tuple = None, 
+                 fixed_channel_indices: list[int] = None, seed: int = 42):
         self.data = data.astype(np.float32)  # [T, C]
         self.labels = labels.astype(np.float32) if labels is not None else np.zeros(len(data), dtype=np.float32)
         self.window_size = window_size
         self.stride = stride
         self.augment_synthetic = augment_synthetic
+        self.subsample_channels_range = subsample_channels_range
+        self.fixed_channel_indices = fixed_channel_indices
+        self.rng = np.random.default_rng(seed)
         self.synth_gen = SyntheticAnomalyGenerator(p_disrupt=0.5, seed=seed) if augment_synthetic else None
         
         self.indices = list(range(0, len(self.data) - self.window_size + 1, self.stride))
@@ -115,6 +120,17 @@ class UniversalWindowDataset(Dataset):
         window_y_dense = self.labels[st:ed].copy()
         window_y = 1.0 if np.any(window_y_dense > 0) else 0.0
 
+        # Optional Dynamic Channel Subsampling (Channel Dropout / Dimension Augmentation)
+        C_total = window_x.shape[0]
+        if self.fixed_channel_indices is not None:
+            window_x = window_x[self.fixed_channel_indices, :]
+        elif self.subsample_channels_range is not None:
+            min_f, max_f = self.subsample_channels_range
+            frac = self.rng.uniform(min_f, max_f)
+            num_keep = max(3, int(C_total * frac))
+            keep_idx = sorted(self.rng.choice(C_total, size=num_keep, replace=False))
+            window_x = window_x[keep_idx, :]
+
         # If synthetic augmentation is enabled and window is originally nominal, inject disruption
         if self.augment_synthetic and window_y == 0.0:
             window_x, synth_dense, synth_win = self.synth_gen(window_x)
@@ -123,7 +139,7 @@ class UniversalWindowDataset(Dataset):
 
         return {
             "st": st,
-            "x": torch.from_numpy(window_x).float(),             # [C, L]
+            "x": torch.from_numpy(window_x).float(),             # [C_sub, L]
             "y_dense": torch.from_numpy(window_y_dense).float(), # [L]
             "y_window": torch.tensor(window_y).float(),          # scalar
             "num_channels": window_x.shape[0]

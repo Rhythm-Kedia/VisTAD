@@ -45,12 +45,16 @@ def compute_contiguous_event_recall(y_true: np.ndarray, y_pred: np.ndarray) -> t
 
 def evaluate_continuous_stream(model: nn.Module, test_data: np.ndarray, test_labels: np.ndarray,
                                window_size: int = 200, stride: int = 10, batch_size: int = 64,
+                               fixed_channel_indices: list[int] = None,
                                device: str = "cpu") -> dict:
     """Evaluates continuous streaming telemetry over an unseen dataset of arbitrary dimension C."""
     n = len(test_data)
     C = test_data.shape[1]
     
-    ds = UniversalWindowDataset(test_data, test_labels, window_size=window_size, stride=stride, augment_synthetic=False)
+    ds = UniversalWindowDataset(
+        test_data, test_labels, window_size=window_size, stride=stride,
+        augment_synthetic=False, fixed_channel_indices=fixed_channel_indices
+    )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
     
     point_scores = np.zeros(n, dtype=np.float32)
@@ -131,6 +135,10 @@ def main():
     parser.add_argument("--train_stride", type=int, default=20)
     parser.add_argument("--eval_stride", type=int, default=10)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--subsample_train", action="store_true",
+                        help="Randomly subsample 40%-100% of channels dynamically during training")
+    parser.add_argument("--eval_channel_fraction", type=float, default=1.0,
+                        help="Fraction of channels to retain at evaluation time (stress-testing sensor dropping)")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--output_json", type=str, default="results/universal_zeroshot_transfer.json")
     args = parser.parse_args()
@@ -158,11 +166,14 @@ def main():
         train_slice_x = raw_data[:train_end]
         train_slice_y = labels[:train_end]
         
+        sub_range = (0.4, 1.0) if args.subsample_train else None
         ds = UniversalWindowDataset(
             train_slice_x, train_slice_y,
             window_size=args.window_size,
             stride=args.train_stride,
-            augment_synthetic=True, seed=42
+            augment_synthetic=True,
+            subsample_channels_range=sub_range,
+            seed=42
         )
         loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
         train_loaders[name] = loader
@@ -178,6 +189,13 @@ def main():
     test_slice_x = eval_raw[eval_train_end:]
     test_slice_y = eval_labels[eval_train_end:]
     print(f"  Target Test Slice: {len(test_slice_x):,} steps (Anomalies: {int(np.sum(test_slice_y)):,}, Channels C: {eval_C})")
+
+    eval_channel_indices = None
+    if args.eval_channel_fraction < 1.0:
+        num_eval_channels = max(3, int(eval_C * args.eval_channel_fraction))
+        np.random.seed(42)
+        eval_channel_indices = sorted(list(np.random.choice(eval_C, size=num_eval_channels, replace=False)))
+        print(f"  [Channel Subsampling Stress-Test Active] Retaining {num_eval_channels}/{eval_C} channels ({args.eval_channel_fraction*100:.1f}%)")
 
     # 3. Instantiate Universal Model
     model = UniversalCyberPhysicalTCN(
@@ -240,7 +258,9 @@ def main():
         eval_metrics = evaluate_continuous_stream(
             model, test_slice_x, test_slice_y,
             window_size=args.window_size, stride=args.eval_stride,
-            batch_size=args.batch_size, device=device
+            batch_size=args.batch_size,
+            fixed_channel_indices=eval_channel_indices,
+            device=device
         )
 
         print(f"Epoch [{epoch:2d}/{args.epochs:2d}] ({epoch_time:.1f}s) | Loss: {avg_loss:.4f} | "
