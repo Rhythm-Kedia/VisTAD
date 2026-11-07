@@ -35,7 +35,7 @@ class SMDPooledDataset(Dataset):
 
     def __getitem__(self, idx):
         rec = self.records[idx]
-        return {
+        item = {
             "x": torch.as_tensor(rec["x"], dtype=torch.float32),          # [38, 200]
             "y_dense": torch.as_tensor(rec["y"], dtype=torch.float32),    # [200]
             "y_cpu": torch.as_tensor(rec["y_cpu"], dtype=torch.float32),  # [200]
@@ -45,12 +45,25 @@ class SMDPooledDataset(Dataset):
             "y_flag": torch.tensor(float(rec["y_flag"]), dtype=torch.float32),
             "machine": rec["machine"]
         }
+        if "z_teacher" in rec:
+            item["z_teacher"] = torch.as_tensor(rec["z_teacher"], dtype=torch.float32)
+            item["has_teacher"] = torch.tensor(1.0, dtype=torch.float32)
+        else:
+            item["z_teacher"] = torch.zeros(1024, dtype=torch.float32)
+            item["has_teacher"] = torch.tensor(0.0, dtype=torch.float32)
+        return item
 
 
-def extract_smd_pooled_windows(data_dir="data/smd", window_size=200):
+def extract_smd_pooled_windows(data_dir="data/smd", window_size=200, teacher_cache_path=None):
     """Extracts balanced curriculum windows across the 50% train and 10% val splits of all 28 machines."""
     test_files = sorted(glob.glob(os.path.join(data_dir, "test", "*.txt")))
     print(f"Loading and extracting windows across all {len(test_files)} SMD machines...")
+
+    teacher_cache = None
+    if teacher_cache_path and os.path.exists(teacher_cache_path):
+        print(f"Loading Ultra-VETime Teacher cache from: {teacher_cache_path}")
+        teacher_cache = torch.load(teacher_cache_path, weights_only=False)
+        print(f"Loaded {len(teacher_cache)} teacher cache records.")
 
     train_records = []
     val_records = []
@@ -112,12 +125,17 @@ def extract_smd_pooled_windows(data_dir="data/smd", window_size=200):
             y_n[missed] = 1.0
             y_d[missed] = 1.0
 
-            train_records.append({
+            key = f"{m_name}_{st}"
+            rec = {
                 "x": w_x, "y": w_y,
                 "y_cpu": y_c, "y_mem": y_m, "y_net": y_n, "y_disk": y_d,
                 "y_flag": float(w_y.max() > 0),
-                "machine": m_name
-            })
+                "machine": m_name,
+                "st": st
+            }
+            if teacher_cache is not None and key in teacher_cache:
+                rec["z_teacher"] = teacher_cache[key]["z_teacher"]
+            train_records.append(rec)
 
         # 2. Validation Windows (a..b)
         va_x = norm_data[a:b]
@@ -198,6 +216,8 @@ def train_smd_pooled():
     parser.add_argument("--hidden_dim", type=int, default=32)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--teacher_cache", type=str, default=None, help="Path to Ultra-VETime teacher cache")
+    parser.add_argument("--w_distill", type=float, default=0.1, help="Distillation feature loss weight")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -212,7 +232,7 @@ def train_smd_pooled():
         device = "cpu"
     print(f"Selected Compute Device: {device}")
 
-    train_recs, val_recs = extract_smd_pooled_windows(args.data_dir)
+    train_recs, val_recs = extract_smd_pooled_windows(args.data_dir, teacher_cache_path=args.teacher_cache)
     train_ds = SMDPooledDataset(train_recs)
     val_ds = SMDPooledDataset(val_recs)
 
@@ -266,6 +286,13 @@ def train_smd_pooled():
             l_d = focal_loss(out["p_disk"], y_disk)
 
             loss = l_joint + 0.25 * (l_c + l_m + l_n + l_d)
+
+            if batch["has_teacher"].sum() > 0:
+                mask = batch["has_teacher"] > 0
+                z_t = batch["z_teacher"].to(device)
+                l_distill = nn.functional.mse_loss(out["student_feat"][mask], z_t[mask])
+                loss = loss + args.w_distill * l_distill
+
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
