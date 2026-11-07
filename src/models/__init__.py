@@ -18,6 +18,11 @@ try:
 except ImportError:
     MSLCoupledTCNStudent = None
 
+try:
+    from .universal_tcn import UniversalCyberPhysicalTCN
+except ImportError:
+    UniversalCyberPhysicalTCN = None
+
 STUDENT_MODELS = {
     "cnn_1d": CNN1DStudent,
     "tcn": lambda in_channels, **kwargs: CNN1DStudent(in_channels=in_channels, use_residual=True, **kwargs),
@@ -26,6 +31,7 @@ STUDENT_MODELS = {
     "smd_coupled_tcn": lambda **kwargs: SMDSubsystemCoupledTCN(**kwargs),
     "gecco_coupled_tcn": lambda **kwargs: GeccoSubsystemCoupledTCN(**kwargs),
     "msl_coupled_tcn": lambda **kwargs: MSLCoupledTCNStudent(**kwargs),
+    "universal_tcn": lambda **kwargs: UniversalCyberPhysicalTCN(**kwargs),
     "bilstm": BiLSTMStudent,
     "timesnet": TimesNetStudent
 }
@@ -43,6 +49,8 @@ def build_student(name: str, in_channels: int = 51, **kwargs):
         return GeccoSubsystemCoupledTCN(**kwargs)
     if name == "msl_coupled_tcn":
         return MSLCoupledTCNStudent(**kwargs)
+    if name == "universal_tcn":
+        return UniversalCyberPhysicalTCN(**kwargs)
     return STUDENT_MODELS[name](in_channels=in_channels, **kwargs)
 
-__all__ = ["CNN1DStudent", "BiLSTMStudent", "TimesNetStudent", "StageCoupledTCNStudent", "SMDSubsystemCoupledTCN", "build_student", "STUDENT_MODELS"]
+__all__ = ["CNN1DStudent", "BiLSTMStudent", "TimesNetStudent", "StageCoupledTCNStudent", "SMDSubsystemCoupledTCN", "UniversalCyberPhysicalTCN", "build_student", "STUDENT_MODELS"]
