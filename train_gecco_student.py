@@ -6,7 +6,7 @@ Evaluates:
    - Train on Events 1..24 + 80% nominal windows.
    - Validate on Events 25..29 + 20% nominal windows.
 2. Strictly Held-Out Head-to-Head Evaluation:
-   - Evaluates on cache/gecco_eval_head_to_head_cache.pt (1,464 windows, Timestamps 70,000 to 139,565).
+   - Evaluates on cache/gecco_eval_head_to_head_cache.pt (1,500 windows, Timestamps 70,000 to 139,565).
    - Compares Student vs Teacher (Ultra-VETime DINOv2-Large) head-to-head on identical metrics.
 """
 
@@ -23,17 +23,41 @@ from sklearn.metrics import roc_auc_score, average_precision_score, precision_re
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 
 from src.models.gecco_coupled_tcn import GeccoSubsystemCoupledTCN
-from src.loss import SimplifiedDistillationLoss
+from src.loss import FocalBCELoss, TemporalDiceLoss
 
 
 class CachedGeccoDataset(Dataset):
-    """Loads pre-cached GECCO windows directly from RAM for zero I/O bottleneck."""
+    """Loads pre-cached GECCO windows directly from RAM with auxiliary subsystem labels."""
 
     def __init__(self, windows_dict, keys, base_m=None, base_s=None):
         self.keys = keys
         self.windows = windows_dict
         self.base_m = torch.as_tensor(base_m, dtype=torch.float32) if base_m is not None else None
         self.base_s = torch.as_tensor(base_s + 1e-6, dtype=torch.float32) if base_s is not None else None
+
+        # Precompute auxiliary labels for each window
+        self.sub_labels = {}
+        for k in keys:
+            w = windows_dict[k]
+            raw_x = np.asarray(w["x"], dtype=np.float32)
+            y = np.asarray(w["y_dense"], dtype=np.float32)
+
+            # Disinfection signal (Redox or Chlorine)
+            redox_dev = np.abs(raw_x[:, 3] - 750.0) > 4.0
+            cl_dev = np.abs(raw_x[:, 1] - 0.166) > 0.02
+            cl2_dev = np.abs(raw_x[:, 6] - 0.109) > 0.015
+            y_d = (y * (redox_dev | cl_dev | cl2_dev)).astype(np.float32)
+
+            # Mineral / Physical Quality signal (pH, Leit, Trueb)
+            ph_dev = np.abs(raw_x[:, 2] - 8.35) > 0.08
+            leit_dev = np.abs(raw_x[:, 4] - 211.0) > 4.0
+            trueb_dev = np.abs(raw_x[:, 5] - 0.019) > 0.01
+            y_q = (y * (ph_dev | leit_dev | trueb_dev)).astype(np.float32)
+
+            missed = (y > 0) & (y_d == 0) & (y_q == 0)
+            y_d[missed] = 1.0
+            y_q[missed] = 1.0
+            self.sub_labels[k] = (y_d, y_q)
 
     def __len__(self):
         return len(self.keys)
@@ -47,15 +71,19 @@ class CachedGeccoDataset(Dataset):
         else:
             x = raw_x
 
+        y_d, y_q = self.sub_labels[k]
+
         return {
             "start_idx": int(k),
             "x": x,
-            "y_dense": torch.as_tensor(w["y_dense"], dtype=torch.float32),              # [200]
+            "y_dense": torch.as_tensor(w["y_dense"], dtype=torch.float32),
+            "y_d": torch.as_tensor(y_d, dtype=torch.float32),
+            "y_q": torch.as_tensor(y_q, dtype=torch.float32),
             "y_flag": torch.tensor(float(w["y_flag"]), dtype=torch.float32),
             "anomaly_ratio": torch.tensor(float(w.get("anomaly_ratio", 0.0)), dtype=torch.float32),
-            "z_teacher": torch.as_tensor(w["z_teacher"], dtype=torch.float32),          # [1024]
-            "teacher_score": torch.tensor(float(w["teacher_score"]), dtype=torch.float32),
-            "teacher_dense_mask": torch.as_tensor(w["teacher_dense_mask"], dtype=torch.float32) # [200]
+            "z_teacher": torch.as_tensor(w.get("z_teacher", np.zeros(1024)), dtype=torch.float32),
+            "teacher_score": torch.tensor(float(w.get("teacher_score", 0.5)), dtype=torch.float32),
+            "teacher_dense_mask": torch.as_tensor(w.get("teacher_dense_mask", np.zeros(200)), dtype=torch.float32)
         }
 
 
@@ -69,7 +97,6 @@ def partition_curriculum_cache(train_cache_path, val_ratio=0.2):
     anom_keys = [k for k in keys if windows[k]["y_flag"] > 0.5]
     norm_keys = [k for k in keys if windows[k]["y_flag"] <= 0.5]
 
-    # Episode-aware split: hold out the last fraction of events for validation
     n_val_anom = max(1, int(len(anom_keys) * val_ratio))
     n_val_norm = max(1, int(len(norm_keys) * val_ratio))
 
@@ -106,7 +133,6 @@ def evaluate_model(model, dataloader, device):
             y_flag = batch["y_flag"].numpy()
             y_dense = batch["y_dense"].numpy()
 
-            # Window score is the maximum point-wise confidence within the window
             win_scores = np.max(pred_dense, axis=-1)
 
             all_scores.extend(win_scores)
@@ -127,7 +153,6 @@ def evaluate_model(model, dataloader, device):
     best_f1 = f1_scores[best_idx]
     best_thresh = thresholds[best_idx] if best_idx < len(thresholds) else 0.5
 
-    # Specificity and FPR at best threshold
     y_pred_binary = (y_scores >= best_thresh).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
     fpr = fp / (fp + tn + 1e-12)
@@ -153,10 +178,10 @@ def train_student():
     parser.add_argument("--train_cache", type=str, default="cache/gecco_train_ultravetime_cache.pt")
     parser.add_argument("--eval_cache", type=str, default="cache/gecco_eval_head_to_head_cache.pt")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
-    parser.add_argument("--epochs", type=int, default=25)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--hidden_dim", type=int, default=64)
+    parser.add_argument("--hidden_dim", type=int, default=48)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
@@ -183,34 +208,37 @@ def train_student():
     print(f"Computed nominal baseline standardization across {len(GECCO_SENSORS)} channels.")
 
     # 1. Load Curriculum Partition
-    windows_dict, train_keys, val_keys = partition_curriculum_cache(args.train_cache, val_ratio=0.2)
+    windows_dict, train_keys, val_keys = partition_curriculum_cache(args.train_cache, val_ratio=0.1)
     train_dataset = CachedGeccoDataset(windows_dict, train_keys, base_m=base_m, base_s=base_s)
     val_dataset = CachedGeccoDataset(windows_dict, val_keys, base_m=base_m, base_s=base_s)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-    # 2. Build Student & Simplified Loss
-    print(f"\nBuilding Subsystem-Coupled Causal TCN (hidden_dim={args.hidden_dim})...")
+    # 2. Build Student
+    print(f"\nBuilding Subsystem-Decoupled Causal TCN (hidden_dim={args.hidden_dim})...")
     model = GeccoSubsystemCoupledTCN(
         in_channels=9,
         hidden_dim=args.hidden_dim,
         teacher_feat_dim=1024,
         kernel_size=5,
         dilations=[1, 2, 4, 8, 16],
-        dropout=args.dropout
+        dropout=args.dropout,
+        base_m=torch.tensor(base_m),
+        base_s=torch.tensor(base_s)
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model Parameters: {total_params:,} ({total_params/1e6:.2f}M params vs Teacher's 304M - {304/(total_params/1e6):.0f}x smaller)")
 
-    criterion = SimplifiedDistillationLoss(alpha=0.1, gamma=2.0, pos_weight=2.0)
+    focal_loss = FocalBCELoss(gamma=2.0, pos_weight=2.0)
+    dice_loss = TemporalDiceLoss()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
 
     # 3. Training Loop with Convergence Diagnostics
-    print(f"\n--- Starting Distillation Training ({args.epochs} Epochs) ---")
+    print(f"\n--- Starting Decoupled Physical Training ({args.epochs} Epochs) ---")
     best_val_f1 = -1.0
     best_checkpoint_path = os.path.join(args.checkpoint_dir, "gecco_coupled_tcn_best.pt")
 
@@ -223,18 +251,17 @@ def train_student():
         for batch in train_loader:
             x = batch["x"].to(device)
             y_dense = batch["y_dense"].to(device)
-            y_flag = batch["y_flag"].to(device)
-            z_teacher = batch["z_teacher"].to(device)
+            y_d = batch["y_d"].to(device)
+            y_q = batch["y_q"].to(device)
 
             optimizer.zero_grad()
             out = model(x)
-            loss, loss_dict = criterion(
-                pred_dense=out["pred_dense"],
-                target_dense=y_dense,
-                student_feat=out["student_feat"],
-                teacher_feat=z_teacher,
-                y_flag=y_flag
-            )
+
+            l_joint = focal_loss(out["pred_dense"], y_dense) + dice_loss(out["pred_dense"], y_dense)
+            l_d = focal_loss(out["p_disinfect"], y_d)
+            l_q = focal_loss(out["p_qual"], y_q)
+
+            loss = l_joint + 0.5 * l_d + 0.5 * l_q
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()

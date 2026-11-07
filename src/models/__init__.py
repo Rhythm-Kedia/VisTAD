@@ -3,7 +3,11 @@ from .bilstm import BiLSTMStudent
 from .timesnet import TimesNetStudent
 from .stage_coupled_tcn import StageCoupledTCNStudent
 from .gecco_coupled_tcn import GeccoSubsystemCoupledTCN
-from .msl_coupled_tcn import MSLCoupledTCNStudent
+
+try:
+    from .msl_coupled_tcn import MSLCoupledTCNStudent
+except ImportError:
+    MSLCoupledTCNStudent = None
 
 STUDENT_MODELS = {
     "cnn_1d": CNN1DStudent,
