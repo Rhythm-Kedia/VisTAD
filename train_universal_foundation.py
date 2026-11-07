@@ -129,8 +129,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--hidden_dim", type=int, default=48)
-    parser.add_argument("--num_heads", type=int, default=4)
+    parser.add_argument("--hidden_dim", type=int, default=128)
+    parser.add_argument("--num_heads", type=int, default=8)
+    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--seeds", nargs="+", type=int, default=[42],
+                        help="List of random seeds for statistical repetitions")
     parser.add_argument("--window_size", type=int, default=200)
     parser.add_argument("--train_stride", type=int, default=20)
     parser.add_argument("--eval_stride", type=int, default=10)
@@ -197,10 +200,11 @@ def main():
         eval_channel_indices = sorted(list(np.random.choice(eval_C, size=num_eval_channels, replace=False)))
         print(f"  [Channel Subsampling Stress-Test Active] Retaining {num_eval_channels}/{eval_C} channels ({args.eval_channel_fraction*100:.1f}%)")
 
-    # 3. Instantiate Universal Model
-    model = UniversalCyberPhysicalTCN(
-        hidden_dim=args.hidden_dim, num_heads=args.num_heads,
-        kernel_size=5, dilations=(1, 2, 4, 8, 16), dropout=0.1
+    # 3. Instantiate Universal Scaled Foundation Model (~2.0M parameters)
+    from src.models.universal_tcn import UniversalFoundationTCN_Pro
+    model = UniversalFoundationTCN_Pro(
+        hidden_dim=args.hidden_dim, num_heads=args.num_heads, num_layers=args.num_layers,
+        kernel_size=5, dilations=(1, 2, 4, 8, 16, 32), dropout=0.1
     ).to(device)
     
     total_params = sum(p.numel() for p in model.parameters())

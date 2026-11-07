@@ -19,9 +19,10 @@ except ImportError:
     MSLCoupledTCNStudent = None
 
 try:
-    from .universal_tcn import UniversalCyberPhysicalTCN
+    from .universal_tcn import UniversalCyberPhysicalTCN, UniversalFoundationTCN_Pro
 except ImportError:
     UniversalCyberPhysicalTCN = None
+    UniversalFoundationTCN_Pro = None
 
 STUDENT_MODELS = {
     "cnn_1d": CNN1DStudent,
@@ -32,6 +33,7 @@ STUDENT_MODELS = {
     "gecco_coupled_tcn": lambda **kwargs: GeccoSubsystemCoupledTCN(**kwargs),
     "msl_coupled_tcn": lambda **kwargs: MSLCoupledTCNStudent(**kwargs),
     "universal_tcn": lambda **kwargs: UniversalCyberPhysicalTCN(**kwargs),
+    "universal_foundation_pro": lambda **kwargs: UniversalFoundationTCN_Pro(**kwargs),
     "bilstm": BiLSTMStudent,
     "timesnet": TimesNetStudent
 }

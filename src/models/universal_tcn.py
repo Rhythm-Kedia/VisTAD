@@ -1,12 +1,13 @@
-"""Universal Any-Dimension Permutation-Equivariant Cyber-Physical TCN (Uni-VETime).
+"""Universal Any-Dimension Permutation-Equivariant Cyber-Physical TCN Foundation Model (UniversalFoundationTCN_Pro).
 
 Architectural Invariants:
 1. Dimension Invariant: Accepts arbitrary C in [1, inf) dynamically.
-2. Causal Inductive Bias: Receptive field L_RF = 125 steps with zero future lookahead.
-3. Permutation-Equivariant Cross-Channel MHA: Captures multi-sensor physical coupling
-   without static C x C weight matrices.
-4. Channel-Level Attribution: Produces per-sensor anomaly probabilities [B, C, L].
-5. Probabilistic Physical Disjunction: Fuses system-wide risk via p_sys = 1 - Prod(1 - p_c).
+2. Causal Inductive Bias: 6-stage causal dilated convolution with L_RF = 253 steps (zero future lookahead).
+3. Stacked Cross-Channel Relational Transformer: 2 Pre-LN Transformer layers (8 heads, D=128, FFN=512)
+   capturing dynamic physical cross-sensor couplings without static C x C weight matrices.
+4. Channel-Level Attribution: Produces per-sensor anomaly risk p_c(t) for root-cause diagnosis.
+5. Calibrated Top-K Probabilistic OR Disjunction: Fuses system-wide risk via p_sys = 1 - Prod_{k in Top-K}(1 - p_{(k)})
+   clamping baseline nominal false alarm rate identically across any dimension C.
 """
 
 import torch
@@ -28,7 +29,7 @@ class CausalConv1dResidualBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Left-only padding for temporal causality
+        # Left-only padding for strict temporal causality
         res = x
         out = F.pad(x, (self.pad_len, 0), mode="constant", value=0.0)
         out = self.norm1(self.act1(self.conv1(out)))
@@ -42,7 +43,8 @@ class ChannelIndependentTemporalBackbone(nn.Module):
     
     Processes each channel independently. Fully invariant to channel count C.
     """
-    def __init__(self, hidden_dim: int = 48, kernel_size: int = 5, dilations: tuple = (1, 2, 4, 8, 16), dropout: float = 0.1):
+    def __init__(self, hidden_dim: int = 128, kernel_size: int = 5, 
+                 dilations: tuple = (1, 2, 4, 8, 16, 32), dropout: float = 0.1):
         super().__init__()
         # Input: 3 causal triplet features [x, delta, diff_30]
         self.in_proj = nn.Conv1d(3, hidden_dim, kernel_size=1)
@@ -60,51 +62,71 @@ class ChannelIndependentTemporalBackbone(nn.Module):
         return self.out_norm(h)  # [B * C, hidden_dim, L]
 
 
-class PermutationEquivariantChannelMHA(nn.Module):
-    """Cross-Channel Multi-Head Attention independent of channel count C.
-    
-    Treats the C channels as tokens in a set. Computes dynamic physical coupling
-    via self-attention without any fixed C x C weight matrix.
-    """
-    def __init__(self, hidden_dim: int = 48, num_heads: int = 4, dropout: float = 0.1):
+class CrossChannelTransformerLayer(nn.Module):
+    """Pre-LN Multi-Head Self-Attention + FFN operating over the set of C channels."""
+    def __init__(self, hidden_dim: int = 128, num_heads: int = 8, ffn_dim: int = 512, dropout: float = 0.1):
         super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_dim)
         self.mha = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
         self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.Linear(hidden_dim, ffn_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(ffn_dim, hidden_dim),
             nn.Dropout(dropout)
         )
-        self.norm_ffn = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, hidden_dim]
+        norm_x = self.norm1(x)
+        attn_out, _ = self.mha(norm_x, norm_x, norm_x)
+        x = x + attn_out
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+
+class StackedCrossChannelTransformer(nn.Module):
+    """Deep stacked permutation-equivariant relational Transformer over C channels."""
+    def __init__(self, hidden_dim: int = 128, num_heads: int = 8, num_layers: int = 2, 
+                 ffn_dim: int = 512, dropout: float = 0.1):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            CrossChannelTransformerLayer(hidden_dim=hidden_dim, num_heads=num_heads, ffn_dim=ffn_dim, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        self.final_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, h_channel_tokens: torch.Tensor) -> torch.Tensor:
         # h_channel_tokens: [B, C, hidden_dim]
-        attn_out, _ = self.mha(h_channel_tokens, h_channel_tokens, h_channel_tokens)
-        h = self.norm(h_channel_tokens + attn_out)
-        out = self.norm_ffn(h + self.ffn(h))
-        return out  # [B, C, hidden_dim]
+        h = h_channel_tokens
+        for layer in self.layers:
+            h = layer(h)
+        return self.final_norm(h)
 
 
-class UniversalCyberPhysicalTCN(nn.Module):
-    """Universal Any-Dimension Cyber-Physical Foundation Anomaly Detector.
+class UniversalFoundationTCN_Pro(nn.Module):
+    """Scaled Universal Any-Dimension Cyber-Physical Foundation Model (~2.0M parameters).
     
     Accepts ANY dimension C in [1, inf) and ANY sequence length L >= 30.
     """
-    def __init__(self, hidden_dim: int = 48, num_heads: int = 4, kernel_size: int = 5, 
-                 dilations: tuple = (1, 2, 4, 8, 16), dropout: float = 0.1):
+    def __init__(self, hidden_dim: int = 128, num_heads: int = 8, num_layers: int = 2,
+                 ffn_dim: int = 512, kernel_size: int = 5,
+                 dilations: tuple = (1, 2, 4, 8, 16, 32), dropout: float = 0.1):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
         
-        # 1. Channel-Independent Causal Backbone (weights shared across all channels)
+        # 1. Channel-Independent Causal Temporal Backbone (Receptive Field L_RF = 253)
         self.temporal_encoder = ChannelIndependentTemporalBackbone(
             hidden_dim=hidden_dim, kernel_size=kernel_size, dilations=dilations, dropout=dropout
         )
         
-        # 2. Permutation-Equivariant Cross-Channel Attention (dimension-agnostic)
-        self.channel_mha = PermutationEquivariantChannelMHA(
-            hidden_dim=hidden_dim, num_heads=num_heads, dropout=dropout
+        # 2. Deep Stacked Cross-Channel Relational Transformer (2 Layers, 8 Heads)
+        self.channel_transformer = StackedCrossChannelTransformer(
+            hidden_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers,
+            ffn_dim=ffn_dim, dropout=dropout
         )
         
         # 3. Dense Point-Wise Channel Anomaly Head (shared across all channels)
@@ -115,14 +137,14 @@ class UniversalCyberPhysicalTCN(nn.Module):
             nn.Conv1d(hidden_dim // 2, 1, kernel_size=1),
             nn.Sigmoid()
         )
-        # Calibrated output initialization: bias = -2.2 -> initial p ~ 0.10
+        # Calibrated output initialization: bias = -2.2 -> initial p_channel ~ 0.10
         nn.init.constant_(self.channel_head[3].bias, -2.2)
 
         # 4. Self-Supervised Causal 1-Step Predictor Head (auxiliary loss)
         self.pred_head = nn.Conv1d(hidden_dim, 1, kernel_size=1)
 
     def extract_triplet_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Extracts [raw, first-order velocity, 30-step causal rolling deviation]."""
+        """Extracts [raw x, first-order velocity dx, 30-step causal rolling deviation]."""
         # x: [B, C, L]
         B, C, L = x.shape
         
@@ -151,7 +173,7 @@ class UniversalCyberPhysicalTCN(nn.Module):
         if x.dim() == 2:
             x = x.unsqueeze(0)  # [1, C, L]
         elif x.dim() == 3 and x.shape[1] > x.shape[2] and x.shape[2] in [9, 38, 51, 55]:
-            # Guard against [B, L, C] accidentally passed instead of [B, C, L]
+            # Guard against [B, L, C] passed instead of [B, C, L]
             x = x.transpose(1, 2)
 
         B, C, L = x.shape
@@ -160,12 +182,12 @@ class UniversalCyberPhysicalTCN(nn.Module):
         triplets = self.extract_triplet_features(x)       # [B * C, 3, L]
         h_temp = self.temporal_encoder(triplets)          # [B * C, hidden_dim, L]
         
-        # 2. Reshape to [B, C, hidden_dim, L] and apply Cross-Channel Attention
+        # 2. Reshape to [B, C, hidden_dim, L] and apply Stacked Cross-Channel Transformer
         h_grid = h_temp.view(B, C, self.hidden_dim, L)    # [B, C, hidden_dim, L]
         
         # Channel summary token via causal temporal pooling (mean over time)
         h_tokens = torch.mean(h_grid, dim=-1)             # [B, C, hidden_dim]
-        h_cross = self.channel_mha(h_tokens)              # [B, C, hidden_dim]
+        h_cross = self.channel_transformer(h_tokens)      # [B, C, hidden_dim]
         
         # Modulate temporal features with cross-channel relational context
         h_enriched = (h_grid + h_cross.unsqueeze(-1)).view(B * C, self.hidden_dim, L)
@@ -178,7 +200,7 @@ class UniversalCyberPhysicalTCN(nn.Module):
         # Prevents false alarm accumulation on large C while guaranteeing that any
         # rogue channel divergence triggers a decisive system alarm.
         actual_k = min(5, C)
-        top_p, top_indices = torch.topk(p_channel, k=actual_k, dim=1)  # [B, actual_k, L]
+        top_p, _ = torch.topk(p_channel, k=actual_k, dim=1)            # [B, actual_k, L]
         p_clamped = torch.clamp(top_p, 1e-6, 1.0 - 1e-6)
         p_system = 1.0 - torch.prod(1.0 - p_clamped, dim=1)            # [B, L]
         
@@ -186,7 +208,7 @@ class UniversalCyberPhysicalTCN(nn.Module):
         window_score = torch.max(p_system, dim=-1)[0]                   # [B]
         
         # 6. Self-Supervised 1-step causal prediction (auxiliary output)
-        pred_next = self.pred_head(h_temp).view(B, C, L)         # [B, C, L]
+        pred_next = self.pred_head(h_temp).view(B, C, L)               # [B, C, L]
 
         return {
             "p_system": p_system,          # [B, L]
@@ -195,3 +217,81 @@ class UniversalCyberPhysicalTCN(nn.Module):
             "window_score": window_score,  # [B]
             "num_channels": C
         }
+
+
+class PermutationEquivariantChannelMHA(nn.Module):
+    """Legacy 1-layer MHA for v1 compatibility."""
+    def __init__(self, hidden_dim: int = 48, num_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Dropout(dropout)
+        )
+        self.norm_ffn = nn.LayerNorm(hidden_dim)
+
+    def forward(self, h_channel_tokens: torch.Tensor) -> torch.Tensor:
+        attn_out, _ = self.mha(h_channel_tokens, h_channel_tokens, h_channel_tokens)
+        h = self.norm(h_channel_tokens + attn_out)
+        out = self.norm_ffn(h + self.ffn(h))
+        return out
+
+
+class UniversalCyberPhysicalTCN_v1(nn.Module):
+    """Legacy v1 prototype architecture."""
+    def __init__(self, hidden_dim: int = 48, num_heads: int = 4, kernel_size: int = 5,
+                 dilations: tuple = (1, 2, 4, 8, 16), dropout: float = 0.1):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.temporal_encoder = ChannelIndependentTemporalBackbone(
+            hidden_dim=hidden_dim, kernel_size=kernel_size, dilations=dilations, dropout=dropout
+        )
+        self.channel_mha = PermutationEquivariantChannelMHA(
+            hidden_dim=hidden_dim, num_heads=num_heads, dropout=dropout
+        )
+        self.channel_head = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_dim // 2, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        nn.init.constant_(self.channel_head[3].bias, -2.2)
+        self.pred_head = nn.Conv1d(hidden_dim, 1, kernel_size=1)
+
+    def extract_triplet_features(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, L = x.shape
+        pad_1 = F.pad(x, (1, 0), mode="replicate")
+        velocity = pad_1[:, :, 1:] - pad_1[:, :, :-1]
+        pad_30 = F.pad(x, (29, 0), mode="replicate")
+        rolling_mean = F.avg_pool1d(pad_30, kernel_size=30, stride=1)
+        deviation = x - rolling_mean
+        triplets = torch.stack([x, velocity, deviation], dim=2)
+        return triplets.view(B * C, 3, L)
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+        B, C, L = x.shape
+        triplets = self.extract_triplet_features(x)
+        h_temp = self.temporal_encoder(triplets)
+        h_grid = h_temp.view(B, C, self.hidden_dim, L)
+        h_tokens = torch.mean(h_grid, dim=-1)
+        h_cross = self.channel_mha(h_tokens)
+        h_enriched = (h_grid + h_cross.unsqueeze(-1)).view(B * C, self.hidden_dim, L)
+        p_channel = self.channel_head(h_enriched).view(B, C, L)
+        actual_k = min(5, C)
+        top_p, _ = torch.topk(p_channel, k=actual_k, dim=1)
+        p_clamped = torch.clamp(top_p, 1e-6, 1.0 - 1e-6)
+        p_system = 1.0 - torch.prod(1.0 - p_clamped, dim=1)
+        window_score = torch.max(p_system, dim=-1)[0]
+        pred_next = self.pred_head(h_temp).view(B, C, L)
+        return {"p_system": p_system, "p_channel": p_channel, "pred_next": pred_next, "window_score": window_score, "num_channels": C}
+
+
+# Backwards compatibility alias
+UniversalCyberPhysicalTCN = UniversalFoundationTCN_Pro
