@@ -10,6 +10,7 @@ Evaluates the MSLCoupledTCNStudent in real-time continuous deployment:
 import os
 import sys
 import time
+import json
 import argparse
 import numpy as np
 import pandas as pd
@@ -137,6 +138,8 @@ def main():
     parser.add_argument("--train_csv", type=str, default="data/msl/msl_train.csv")
     parser.add_argument("--window_size", type=int, default=200)
     parser.add_argument("--stride", type=int, default=10)
+    parser.add_argument("--save_json", type=str, default="results/msl_msl_test_coupled_tcn_eval.json")
+    parser.add_argument("--eval_cache", type=str, default="cache/msl_eval_head_to_head_cache.pt")
     args = parser.parse_args()
 
     device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -191,6 +194,85 @@ def main():
     print(f"Throughput:                   {all_res['throughput_fps']:.1f} windows/second ({all_res['latency_ms']:.3f} ms/window)")
     print(f"Total Stream Evaluation Time: {all_res['total_eval_time']:.2f} seconds")
     print("=" * 75)
+
+    # 3. Held-Out Cache Evaluation
+    cache_metrics = None
+    if args.eval_cache and os.path.exists(args.eval_cache):
+        from train_msl_student import evaluate_held_out_cache
+        cache_metrics = evaluate_held_out_cache(model, args.eval_cache, base_m, base_s, device)
+
+    if args.save_json:
+        os.makedirs(os.path.dirname(args.save_json) or ".", exist_ok=True)
+        out_dict = {
+            "dataset": "msl",
+            "entity": "msl_test",
+            "architecture": "msl_coupled_tcn",
+            "parameters": sum(p.numel() for p in model.parameters()),
+            "num_channels": 55,
+            "continuous_streaming_complete_stream": {
+                "total_timesteps": len(norm_data),
+                "anomaly_timesteps": int(raw_labels.sum()),
+                "nominal_timesteps": int(len(norm_data) - raw_labels.sum()),
+                "num_episodes": 36,
+                "stride": args.stride,
+                "window_size": args.window_size,
+                "point_auroc": all_res["auroc"],
+                "point_pr_auc": all_res["pr_auc"],
+                "point_best_f1": all_res["best_f1"],
+                "precision": all_res["precision"],
+                "recall": all_res["recall"],
+                "specificity": all_res["specificity"],
+                "fpr": all_res["fpr"],
+                "true_positives": all_res["tp"],
+                "false_positives": all_res["fp"],
+                "false_negatives": all_res["fn"],
+                "throughput_windows_sec": all_res["throughput_fps"],
+                "latency_ms_per_window": all_res["latency_ms"],
+                "total_eval_time_sec": all_res["total_eval_time"]
+            },
+            "continuous_streaming_held_out_partition_2": {
+                "timesteps_range": [37000, 73728],
+                "total_timesteps": len(p2_data),
+                "anomaly_timesteps": int(p2_labels.sum()),
+                "num_episodes": 18,
+                "stride": args.stride,
+                "window_size": args.window_size,
+                "point_auroc": p2_res["auroc"],
+                "point_pr_auc": p2_res["pr_auc"],
+                "point_best_f1": p2_res["best_f1"],
+                "precision": p2_res["precision"],
+                "recall": p2_res["recall"],
+                "specificity": p2_res["specificity"],
+                "fpr": p2_res["fpr"],
+                "true_positives": p2_res["tp"],
+                "false_positives": p2_res["fp"],
+                "false_negatives": p2_res["fn"],
+                "throughput_windows_sec": p2_res["throughput_fps"],
+                "latency_ms_per_window": p2_res["latency_ms"],
+                "total_eval_time_sec": p2_res["total_eval_time"]
+            },
+            "baseline_comparison": {
+                "vistad_paper_baseline": {
+                    "point_auroc": 0.4366,
+                    "point_pr_auc": 0.0347,
+                    "point_best_f1": 0.0811
+                },
+                "delta_complete_stream": {
+                    "auroc_gain": f"+{all_res['auroc'] - 0.4366:.4f}",
+                    "pr_auc_boost": f"{all_res['pr_auc'] / 0.0347:.1f}x",
+                    "best_f1_boost": f"{all_res['best_f1'] / 0.0811:.1f}x"
+                }
+            }
+        }
+        if cache_metrics:
+            out_dict["held_out_cache_metrics"] = {
+                "num_windows": 1393,
+                "student": cache_metrics["student"],
+                "teacher_ultravetime_dinov2_large": cache_metrics["teacher"]
+            }
+        with open(args.save_json, "w") as f:
+            json.dump(out_dict, f, indent=2, default=lambda o: int(o) if isinstance(o, (np.integer,)) else (float(o) if isinstance(o, (np.floating,)) else str(o)))
+        print(f"Saved evaluation metrics -> {args.save_json}")
 
 
 if __name__ == "__main__":

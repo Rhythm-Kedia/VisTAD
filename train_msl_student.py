@@ -127,7 +127,7 @@ def evaluate_held_out_cache(model, cache_path, base_m, base_s, device):
             x = (raw_x - base_m) / base_s
             out = model(x.unsqueeze(0).to(device))
             # Window score is max point anomaly probability
-            s_student = float(torch.max(out["pred_dense"]).cpu())
+            s_student = float(out["pred_scalar"].cpu())
             student_scores.append(s_student)
             teacher_scores.append(float(w.get("teacher_score", 0.5)))
             y_flags.append(float(w.get("y_flag", 0.0)))
@@ -167,7 +167,7 @@ def main():
     parser.add_argument("--test_csv", type=str, default="data/msl/msl_test.csv")
     parser.add_argument("--train_cache", type=str, default="cache/msl_train_ultravetime_cache.pt")
     parser.add_argument("--eval_cache", type=str, default="cache/msl_eval_head_to_head_cache.pt")
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--save_path", type=str, default="checkpoints/msl_coupled_tcn_best.pt")
