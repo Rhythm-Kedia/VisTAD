@@ -8,6 +8,8 @@ Evaluates:
 2. Strictly Held-Out Head-to-Head Evaluation:
    - Evaluates on cache/gecco_eval_head_to_head_cache.pt (1,500 windows, Timestamps 70,000 to 139,565).
    - Compares Student vs Teacher (Ultra-VETime DINOv2-Large) head-to-head on identical metrics.
+3. Feature Representation Distillation:
+   - Cosine distillation from 1024-d DINOv2-Large teacher embeddings.
 """
 
 import os
@@ -15,8 +17,10 @@ import sys
 import time
 import argparse
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, confusion_matrix
 
@@ -24,6 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
 
 from src.models.gecco_coupled_tcn import GeccoSubsystemCoupledTCN
 from src.loss import FocalBCELoss, TemporalDiceLoss
+from vlm4ts.gecco_renderer import GECCO_SENSORS
 
 
 class CachedGeccoDataset(Dataset):
@@ -87,10 +92,10 @@ class CachedGeccoDataset(Dataset):
         }
 
 
-def partition_curriculum_cache(train_cache_path, val_ratio=0.2):
+def partition_curriculum_cache(train_cache_path, val_ratio=0.1):
     """Partitions curriculum cache into Train and Val using Episode-Aware splitting."""
     print(f"Loading GECCO curriculum cache from {train_cache_path}...")
-    c = torch.load(train_cache_path, weights_only=False)
+    c = torch.load(train_cache_path, map_location="cpu", weights_only=False)
     windows = c["windows"]
     keys = sorted(list(windows.keys()))
 
@@ -121,8 +126,6 @@ def evaluate_model(model, dataloader, device):
     model.eval()
     all_scores = []
     all_flags = []
-    all_pred_dense = []
-    all_gt_dense = []
 
     t0 = time.time()
     with torch.no_grad():
@@ -131,14 +134,10 @@ def evaluate_model(model, dataloader, device):
             out = model(x)
             pred_dense = out["pred_dense"].cpu().numpy()
             y_flag = batch["y_flag"].numpy()
-            y_dense = batch["y_dense"].numpy()
 
             win_scores = np.max(pred_dense, axis=-1)
-
             all_scores.extend(win_scores)
             all_flags.extend(y_flag)
-            all_pred_dense.append(pred_dense)
-            all_gt_dense.append(y_dense)
 
     eval_time = time.time() - t0
     y_true = np.array(all_flags)
@@ -175,6 +174,7 @@ def evaluate_model(model, dataloader, device):
 
 def train_student():
     parser = argparse.ArgumentParser(description="Train Subsystem-Coupled TCN Student on GECCO")
+    parser.add_argument("--data_path", type=str, default="data/gecco/gecco_water.csv")
     parser.add_argument("--train_cache", type=str, default="cache/gecco_train_ultravetime_cache.pt")
     parser.add_argument("--eval_cache", type=str, default="cache/gecco_eval_head_to_head_cache.pt")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
@@ -183,6 +183,7 @@ def train_student():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden_dim", type=int, default=48)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--distill_alpha", type=float, default=0.1, help="VLM feature distillation loss weight")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
@@ -198,10 +199,16 @@ def train_student():
         device = "cpu"
     print(f"Selected Compute Device: {device}")
 
-    # 0. Load Nominal Baseline Statistics (first 16,000 steps)
-    import pandas as pd
-    from vlm4ts.gecco_renderer import GECCO_SENSORS
-    df_raw = pd.read_csv("data/gecco/gecco_water.csv")
+    # 0. Load Nominal Baseline Statistics
+    data_path = args.data_path
+    if not os.path.exists(data_path):
+        candidates = ["data/gecco/gecco_water.csv", "data/gecco_water.csv", "/kaggle/input/vistad-data/gecco/gecco_water.csv"]
+        for c in candidates:
+            if os.path.exists(c):
+                data_path = c
+                break
+
+    df_raw = pd.read_csv(data_path)
     base_slice = df_raw.iloc[:16000][GECCO_SENSORS].values.astype(np.float32)
     base_m = np.mean(base_slice, axis=0)
     base_s = np.std(base_slice, axis=0) + 1e-6
@@ -223,9 +230,7 @@ def train_student():
         teacher_feat_dim=1024,
         kernel_size=5,
         dilations=[1, 2, 4, 8, 16],
-        dropout=args.dropout,
-        base_m=torch.tensor(base_m),
-        base_s=torch.tensor(base_s)
+        dropout=args.dropout
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -253,15 +258,19 @@ def train_student():
             y_dense = batch["y_dense"].to(device)
             y_d = batch["y_d"].to(device)
             y_q = batch["y_q"].to(device)
+            z_teacher = batch["z_teacher"].to(device)
 
             optimizer.zero_grad()
             out = model(x)
 
             l_joint = focal_loss(out["pred_dense"], y_dense) + dice_loss(out["pred_dense"], y_dense)
-            l_d = focal_loss(out["p_disinfect"], y_d)
-            l_q = focal_loss(out["p_qual"], y_q)
 
-            loss = l_joint + 0.5 * l_d + 0.5 * l_q
+            # Feature Distillation loss from DINOv2 teacher
+            s_feat = out["pred_feature"]
+            t_feat = F.normalize(z_teacher, p=2, dim=-1)
+            l_feat = (1.0 - torch.sum(s_feat * t_feat, dim=-1)).mean()
+
+            loss = l_joint + args.distill_alpha * l_feat
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -301,7 +310,7 @@ def train_student():
     # 4. Strictly Held-Out Head-to-Head Evaluation
     if os.path.exists(args.eval_cache):
         print(f"\n--- Loading Strictly Held-Out Evaluation Cache ({args.eval_cache}) ---")
-        eval_c = torch.load(args.eval_cache, weights_only=False)
+        eval_c = torch.load(args.eval_cache, map_location="cpu", weights_only=False)
         eval_wins = eval_c["windows"]
         eval_keys = sorted(list(eval_wins.keys()))
         eval_dataset = CachedGeccoDataset(eval_wins, eval_keys, base_m=base_m, base_s=base_s)
