@@ -143,6 +143,15 @@ class UniversalFoundationTCN_Pro(nn.Module):
         # 4. Self-Supervised Causal 1-Step Predictor Head (auxiliary loss)
         self.pred_head = nn.Conv1d(hidden_dim, 1, kernel_size=1)
 
+        # 5. Dimension-Invariant VLM Feature Distillation Head
+        # Projects pooled cross-channel relational state into 1024-dim DINOv2 manifold
+        self.vlm_proj_head = nn.Sequential(
+            nn.Linear(hidden_dim, 512),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, 1024)
+        )
+
     def extract_triplet_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extracts [raw x, first-order velocity dx, 30-step causal rolling deviation]."""
         # x: [B, C, L]
@@ -161,14 +170,16 @@ class UniversalFoundationTCN_Pro(nn.Module):
         triplets = torch.stack([x, velocity, deviation], dim=2)
         return triplets.view(B * C, 3, L)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, prefix_len: int = 0) -> dict[str, torch.Tensor]:
         """
         x: [B, C, L] where C is ANY dimension, L is sequence length.
+        prefix_len: length of initial warm-up prefix to exclude from global window score.
         Returns:
             p_system: [B, L] calibrated system-wide continuous anomaly probability
             p_channel: [B, C, L] per-sensor root-cause anomaly attribution
             pred_next: [B, C, L] 1-step causal self-supervised prediction
             window_score: [B] global window anomaly score
+            z_student: [B, 1024] normalized VLM-aligned student feature representation
         """
         if x.dim() == 2:
             x = x.unsqueeze(0)  # [1, C, L]
@@ -182,39 +193,45 @@ class UniversalFoundationTCN_Pro(nn.Module):
         triplets = self.extract_triplet_features(x)       # [B * C, 3, L]
         h_temp = self.temporal_encoder(triplets)          # [B * C, hidden_dim, L]
         
-        # 2. Reshape to [B, C, hidden_dim, L] and apply Stacked Cross-Channel Transformer
-        h_grid = h_temp.view(B, C, self.hidden_dim, L)    # [B, C, hidden_dim, L]
+        # 2. Cross-Channel Relational Attention via Temporal Summary Tokens
+        # Memory-efficient: compute causal mean pooling directly on 3D tensor to avoid 4D allocation
+        h_tokens = torch.mean(h_temp, dim=-1).view(B, C, self.hidden_dim)  # [B, C, hidden_dim]
+        h_cross = self.channel_transformer(h_tokens)                       # [B, C, hidden_dim]
         
-        # Channel summary token via causal temporal pooling (mean over time)
-        h_tokens = torch.mean(h_grid, dim=-1)             # [B, C, hidden_dim]
-        h_cross = self.channel_transformer(h_tokens)      # [B, C, hidden_dim]
-        
-        # Modulate temporal features with cross-channel relational context
-        h_enriched = (h_grid + h_cross.unsqueeze(-1)).view(B * C, self.hidden_dim, L)
+        # Broadcast cross-channel relational context back into temporal representations
+        h_enriched = h_temp + h_cross.view(B * C, self.hidden_dim, 1)      # [B * C, hidden_dim, L]
         
         # 3. Dense Channel Anomaly Probabilities
         p_channel = self.channel_head(h_enriched).view(B, C, L)  # [B, C, L]
         
         # 4. Dimension-Invariant Top-K Probabilistic Physical Disjunction
         # Fuses the top-K most suspicious channels at each timestep:
-        # Prevents false alarm accumulation on large C while guaranteeing that any
-        # rogue channel divergence triggers a decisive system alarm.
         actual_k = min(5, C)
         top_p, _ = torch.topk(p_channel, k=actual_k, dim=1)            # [B, actual_k, L]
-        p_clamped = torch.clamp(top_p, 1e-6, 1.0 - 1e-6)
+        p_clamped = torch.clamp(top_p, 1e-5, 1.0 - 1e-5)
         p_system = 1.0 - torch.prod(1.0 - p_clamped, dim=1)            # [B, L]
+        p_system = torch.clamp(p_system, 1e-5, 1.0 - 1e-5)
         
-        # 5. Global Window Score
-        window_score = torch.max(p_system, dim=-1)[0]                   # [B]
+        # 5. Global Window Score (evaluated strictly on the warmed-up valid target horizon)
+        if prefix_len > 0 and L > prefix_len:
+            window_score = torch.max(p_system[:, prefix_len:], dim=-1)[0]  # [B]
+        else:
+            window_score = torch.max(p_system, dim=-1)[0]                  # [B]
+        window_score = torch.clamp(window_score, 1e-5, 1.0 - 1e-5)
         
         # 6. Self-Supervised 1-step causal prediction (auxiliary output)
         pred_next = self.pred_head(h_temp).view(B, C, L)               # [B, C, L]
+
+        # 7. Dimension-Invariant VLM Student Representation (1024-dim DINOv2 alignment)
+        h_global = torch.mean(h_cross, dim=1)                           # [B, hidden_dim]
+        z_student = F.normalize(self.vlm_proj_head(h_global), p=2, dim=-1)  # [B, 1024]
 
         return {
             "p_system": p_system,          # [B, L]
             "p_channel": p_channel,        # [B, C, L]
             "pred_next": pred_next,        # [B, C, L]
             "window_score": window_score,  # [B]
+            "z_student": z_student,        # [B, 1024]
             "num_channels": C
         }
 

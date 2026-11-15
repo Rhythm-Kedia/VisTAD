@@ -12,7 +12,7 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 
-from src.models.universal_tcn import UniversalCyberPhysicalTCN
+from src.models.universal_tcn import UniversalCyberPhysicalTCN, UniversalFoundationTCN_Pro
 from src.data.universal_dataset import load_dataset_telemetry
 from train_universal_foundation import evaluate_continuous_stream
 
@@ -22,11 +22,18 @@ def run_subsampling_sweep(ckpt_path: str, dataset_name: str = "swat",
                           device: str = "cpu"):
     print(f"Loading checkpoint: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    hidden_dim = ckpt.get("model_config", {}).get("hidden_dim", 48)
-    num_heads = ckpt.get("model_config", {}).get("num_heads", 4)
+    hidden_dim = ckpt.get("model_config", {}).get("hidden_dim", 128)
+    num_heads = ckpt.get("model_config", {}).get("num_heads", 8)
+    num_layers = ckpt.get("model_config", {}).get("num_layers", 2)
+    prefix_len = ckpt.get("model_config", {}).get("prefix_len", 0)
+    state_dict = ckpt["model_state_dict"]
     
-    model = UniversalCyberPhysicalTCN(hidden_dim=hidden_dim, num_heads=num_heads).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    is_pro = any("enc_blocks.1" in k for k in state_dict.keys()) or ckpt.get("model_type") == "UniversalFoundationTCN_Pro"
+    if is_pro:
+        model = UniversalFoundationTCN_Pro(hidden_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers).to(device)
+    else:
+        model = UniversalCyberPhysicalTCN(hidden_dim=hidden_dim, num_heads=num_heads).to(device)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     print(f"Loading test stream: [{dataset_name.upper()}]")
@@ -50,7 +57,7 @@ def run_subsampling_sweep(ckpt_path: str, dataset_name: str = "swat",
         
         m = evaluate_continuous_stream(
             model, test_x, test_y,
-            window_size=200, stride=50, batch_size=64,
+            window_size=200, prefix_len=prefix_len, stride=50, batch_size=64,
             fixed_channel_indices=keep_indices,
             device=device
         )

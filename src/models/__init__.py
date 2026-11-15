@@ -51,8 +51,8 @@ def build_student(name: str, in_channels: int = 51, **kwargs):
         return GeccoSubsystemCoupledTCN(**kwargs)
     if name == "msl_coupled_tcn":
         return MSLCoupledTCNStudent(**kwargs)
-    if name == "universal_tcn":
-        return UniversalCyberPhysicalTCN(**kwargs)
+    if name in ["universal_tcn", "universal_foundation_pro"]:
+        return UniversalFoundationTCN_Pro(**kwargs)
     return STUDENT_MODELS[name](in_channels=in_channels, **kwargs)
 
 __all__ = ["CNN1DStudent", "BiLSTMStudent", "TimesNetStudent", "StageCoupledTCNStudent", "SMDSubsystemCoupledTCN", "UniversalCyberPhysicalTCN", "build_student", "STUDENT_MODELS"]

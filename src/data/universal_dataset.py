@@ -91,14 +91,16 @@ class SyntheticAnomalyGenerator:
 
 
 class UniversalWindowDataset(Dataset):
-    """Sliding-window dataset for an arbitrary C-channel multivariate time series."""
+    """Sliding-window dataset for an arbitrary C-channel multivariate time series with causal prefix buffer."""
     def __init__(self, data: np.ndarray, labels: np.ndarray = None, window_size: int = 200, 
-                 stride: int = 10, augment_synthetic: bool = False, 
+                 prefix_len: int = 100, stride: int = 10, augment_synthetic: bool = False, 
                  subsample_channels_range: tuple = None, 
-                 fixed_channel_indices: list[int] = None, seed: int = 42):
+                 fixed_channel_indices: list[int] = None,
+                 teacher_cache: dict = None, seed: int = 42):
         self.data = data.astype(np.float32)  # [T, C]
         self.labels = labels.astype(np.float32) if labels is not None else np.zeros(len(data), dtype=np.float32)
         self.window_size = window_size
+        self.prefix_len = prefix_len
         self.stride = stride
         self.augment_synthetic = augment_synthetic
         self.subsample_channels_range = subsample_channels_range
@@ -106,6 +108,27 @@ class UniversalWindowDataset(Dataset):
         self.rng = np.random.default_rng(seed)
         self.synth_gen = SyntheticAnomalyGenerator(p_disrupt=0.5, seed=seed) if augment_synthetic else None
         
+        # Ingest and normalize teacher cache if provided
+        self.teacher_windows = {}
+        if teacher_cache is not None:
+            raw_wins = teacher_cache.get("windows", teacher_cache)
+            if isinstance(raw_wins, dict):
+                for k, v in raw_wins.items():
+                    if isinstance(v, dict):
+                        st_idx = v.get("start_idx", None)
+                        if st_idx is None:
+                            if isinstance(k, (int, np.integer)):
+                                st_idx = int(k)
+                            elif isinstance(k, str) and "_" in k:
+                                parts = k.split("_")
+                                try:
+                                    st_idx = int(parts[-1].lstrip("t"))
+                                except ValueError:
+                                    pass
+                        if st_idx is not None:
+                            self.teacher_windows[int(st_idx)] = v
+
+        self.cached_starts = np.array(sorted(self.teacher_windows.keys())) if len(self.teacher_windows) > 0 else np.array([], dtype=int)
         self.indices = list(range(0, len(self.data) - self.window_size + 1, self.stride))
 
     def __len__(self):
@@ -115,34 +138,114 @@ class UniversalWindowDataset(Dataset):
         st = self.indices[idx]
         ed = st + self.window_size
         
-        # [C, L]
-        window_x = self.data[st:ed].T.copy()
-        window_y_dense = self.labels[st:ed].copy()
-        window_y = 1.0 if np.any(window_y_dense > 0) else 0.0
+        # 1. Target window: [L_target, C]
+        target_x = self.data[st:ed]
+        target_y_dense = self.labels[st:ed]
+        
+        # 2. Historical Receptive Field Prefix: [L_prefix, C]
+        if self.prefix_len > 0:
+            if st >= self.prefix_len:
+                prefix_x = self.data[st - self.prefix_len : st]
+            else:
+                prefix_x = self.data[0 : st]
+                pad_len = self.prefix_len - len(prefix_x)
+                if len(prefix_x) > 0:
+                    prefix_x = np.pad(prefix_x, ((pad_len, 0), (0, 0)), mode="edge")
+                else:
+                    prefix_x = np.repeat(target_x[:1], self.prefix_len, axis=0)
+            
+            full_x = np.concatenate([prefix_x, target_x], axis=0).T  # [C, L_total]
+            full_y_dense = np.concatenate([np.zeros(self.prefix_len, dtype=np.float32), target_y_dense], axis=0)
+        else:
+            full_x = target_x.T  # [C, L_target]
+            full_y_dense = target_y_dense
 
-        # Optional Dynamic Channel Subsampling (Channel Dropout / Dimension Augmentation)
-        C_total = window_x.shape[0]
+        window_y = 1.0 if np.any(target_y_dense > 0) else 0.0
+
+        # Fixed channel indices (e.g. at test time for sensor-dropping stress testing)
         if self.fixed_channel_indices is not None:
-            window_x = window_x[self.fixed_channel_indices, :]
-        elif self.subsample_channels_range is not None:
-            min_f, max_f = self.subsample_channels_range
-            frac = self.rng.uniform(min_f, max_f)
-            num_keep = max(3, int(C_total * frac))
-            keep_idx = sorted(self.rng.choice(C_total, size=num_keep, replace=False))
-            window_x = window_x[keep_idx, :]
+            full_x = full_x[self.fixed_channel_indices, :]
 
-        # If synthetic augmentation is enabled and window is originally nominal, inject disruption
+        # Synthetic augmentation (injected into target horizon only)
         if self.augment_synthetic and window_y == 0.0:
-            window_x, synth_dense, synth_win = self.synth_gen(window_x)
-            window_y_dense = np.maximum(window_y_dense, synth_dense)
+            target_region = full_x[:, self.prefix_len:]
+            aug_region, synth_dense, synth_win = self.synth_gen(target_region)
+            full_x[:, self.prefix_len:] = aug_region
+            full_y_dense[self.prefix_len:] = np.maximum(full_y_dense[self.prefix_len:], synth_dense)
             window_y = float(max(window_y, synth_win))
+
+        # Teacher supervision lookup
+        has_teacher = 0.0
+        z_teacher = torch.zeros(1024, dtype=torch.float32)
+        teacher_score = 0.0
+
+        target_st = None
+        if st in self.teacher_windows:
+            target_st = st
+        elif len(self.cached_starts) > 0:
+            idx = np.searchsorted(self.cached_starts, st)
+            candidates = []
+            if idx < len(self.cached_starts):
+                candidates.append(self.cached_starts[idx])
+            if idx > 0:
+                candidates.append(self.cached_starts[idx - 1])
+            if len(candidates) > 0:
+                best = min(candidates, key=lambda c: abs(c - st))
+                if abs(best - st) <= max(15, self.stride):
+                    target_st = best
+
+        if target_st is not None and target_st in self.teacher_windows:
+            w_info = self.teacher_windows[target_st]
+            if "z_teacher" in w_info:
+                z_teacher = w_info["z_teacher"].clone().detach().float()
+                teacher_score = float(w_info.get("teacher_score", 0.0))
+                has_teacher = 1.0
 
         return {
             "st": st,
-            "x": torch.from_numpy(window_x).float(),             # [C_sub, L]
-            "y_dense": torch.from_numpy(window_y_dense).float(), # [L]
-            "y_window": torch.tensor(window_y).float(),          # scalar
-            "num_channels": window_x.shape[0]
+            "x": torch.from_numpy(full_x).float(),                   # [C, L_total]
+            "y_dense": torch.from_numpy(full_y_dense).float(),       # [L_total]
+            "y_window": torch.tensor(window_y).float(),              # scalar
+            "prefix_len": self.prefix_len,
+            "z_teacher": z_teacher,                                  # [1024]
+            "teacher_score": torch.tensor(teacher_score).float(),    # scalar
+            "has_teacher": torch.tensor(has_teacher).float(),        # scalar
+            "num_channels": full_x.shape[0]
+        }
+
+
+class UniversalCollate:
+    """Batch collator that applies coordinated channel subsampling across all samples in a batch.
+    
+    Guarantees all B samples in the batch share the exact same retained channel indices,
+    producing a well-formed [B, C_sub, L] tensor without artificial padding.
+    """
+    def __init__(self, subsample_range: tuple = None, seed: int = 42):
+        self.subsample_range = subsample_range
+        self.rng = np.random.default_rng(seed)
+
+    def __call__(self, batch: list[dict]) -> dict:
+        base_c = batch[0]["x"].shape[0]
+        
+        if self.subsample_range is not None:
+            min_f, max_f = self.subsample_range
+            frac = self.rng.uniform(min_f, max_f)
+            num_keep = max(3, int(base_c * frac))
+            keep_idx = sorted(self.rng.choice(base_c, size=num_keep, replace=False))
+            x_list = [item["x"][keep_idx, :] for item in batch]
+        else:
+            x_list = [item["x"] for item in batch]
+
+        return {
+            "st": torch.tensor([item["st"] for item in batch], dtype=torch.long),
+            "x": torch.stack(x_list, dim=0),
+            "y_dense": torch.stack([item["y_dense"] for item in batch], dim=0),
+            "y_window": torch.stack([item["y_window"] for item in batch], dim=0),
+            "prefix_len": batch[0]["prefix_len"],
+            "z_teacher": torch.stack([item["z_teacher"] for item in batch], dim=0),
+            "teacher_score": torch.stack([item["teacher_score"] for item in batch], dim=0),
+            "has_teacher": torch.stack([item["has_teacher"] for item in batch], dim=0),
+            "num_channels": x_list[0].shape[0]
         }
 
 
