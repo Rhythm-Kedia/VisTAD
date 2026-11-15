@@ -70,11 +70,15 @@ class GeccoDashboardRenderer:
         ax2.grid(True, alpha=0.3)
         ax2.legend(fontsize=6, loc="upper right")
 
-        # Panel 3: Operational & Hydraulic Context (Fm, Fm_2, Tp)
+        # Panel 3: Operational & Hydraulic Context (Fm, Fm_2, delta Tp)
         ax3 = axes[0, 1]
-        for col in SUB_B_HYDRAULIC:
+        for col in ["Fm", "Fm_2"]:
             idx = self.sensor_to_idx[col]
             ax3.plot(t_axis, z_scores[:, idx], label=col, color=COLOR_MAP[col], lw=1.0)
+        idx_tp = self.sensor_to_idx["Tp"]
+        delta_tp = (window_data[:, idx_tp] - window_data[0, idx_tp]) / 0.20
+        ax3.plot(t_axis, delta_tp, label="ΔTp (0.2°C)", color=COLOR_MAP["Tp"], lw=1.0)
+        ax3.set_ylim(-4, 4)
         ax3.set_title("Panel 3: Hydraulic & Thermal Context", fontsize=8, fontweight="bold")
         ax3.grid(True, alpha=0.3)
         ax3.legend(fontsize=6, loc="upper right")

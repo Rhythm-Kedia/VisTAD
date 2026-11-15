@@ -57,6 +57,34 @@ st.markdown("""
         font-size: 0.75rem;
         color: #64748b;
     }
+    .badge-zeroshot {
+        background-color: #eff6ff;
+        border: 1px solid #bfdbfe;
+        color: #1e40af;
+        padding: 10px 14px;
+        border-radius: 6px;
+        font-size: 0.88rem;
+        margin-bottom: 12px;
+    }
+    .badge-pure {
+        background-color: #fffbeb;
+        border: 1px solid #fde68a;
+        color: #92400e;
+        padding: 10px 14px;
+        border-radius: 6px;
+        font-size: 0.88rem;
+        margin-bottom: 12px;
+    }
+    .model-spec-card {
+        background-color: #f1f5f9;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-top: 8px;
+        margin-bottom: 12px;
+        font-size: 0.80rem;
+        border-left: 3px solid #0284c7;
+        line-height: 1.45;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -82,6 +110,47 @@ def fmt_metric(val):
     return f"{float(val):.3f}"
 
 
+def get_feature_names_for_dataset(ds_name, n_channels):
+    """Retrieves intuitive human-readable sensor tag names for known benchmark datasets."""
+    ds_lower = ds_name.lower()
+    data_dir = os.path.join(ROOT_DIR, "data")
+    
+    if "swat" in ds_lower:
+        csv_p = os.path.join(data_dir, "swat/SWaT_Dataset_Attack_v0.csv")
+        if not os.path.exists(csv_p):
+            csv_p = os.path.join(data_dir, "samples/test_swat_water_scada.csv")
+        if os.path.exists(csv_p):
+            try:
+                cols = list(pd.read_csv(csv_p, nrows=1).columns)
+                feat_cols = [c for c in cols if c.lower() not in ["attack", "label", "timestamp", "time", "anomaly_label", "normal/attack"]]
+                if len(feat_cols) == n_channels:
+                    return feat_cols
+            except Exception:
+                pass
+    elif "gecco" in ds_lower:
+        csv_p = os.path.join(data_dir, "gecco/gecco_water.csv")
+        if os.path.exists(csv_p):
+            try:
+                cols = list(pd.read_csv(csv_p, nrows=1).columns)
+                feat_cols = [c for c in cols if c.lower() not in ["attack", "label", "timestamp", "time"]]
+                if len(feat_cols) == n_channels:
+                    return feat_cols
+            except Exception:
+                pass
+    elif "msl" in ds_lower:
+        csv_p = os.path.join(data_dir, "msl/msl_test.csv")
+        if os.path.exists(csv_p):
+            try:
+                cols = list(pd.read_csv(csv_p, nrows=1).columns)
+                feat_cols = [c for c in cols if c.lower() not in ["attack", "label", "timestamp", "time"]]
+                if len(feat_cols) == n_channels:
+                    return feat_cols
+            except Exception:
+                pass
+
+    return [f"Sensor {i}" for i in range(n_channels)]
+
+
 @st.cache_resource
 def get_engine():
     return VisTADServingEngine()
@@ -91,8 +160,8 @@ def main():
     engine = get_engine()
 
     # Header
-    st.title("VisTAD: Time-Series Anomaly Detection")
-    st.caption("Edge-deployable 1D-CNN distilled from VLM teacher for multivariate telemetry anomaly detection.")
+    st.title("VisTAD: Universal Cyber-Physical Telemetry Anomaly Detection")
+    st.caption("Any-Dimension Foundation Models & Distilled Specialized Students with Continuous Probability Calibration.")
 
     # Sidebar: Input Configuration
     st.sidebar.header("1. Input Telemetry")
@@ -108,8 +177,8 @@ def main():
     time_index = None
     dataset_name = ""
     feature_names = []
-    default_model = "SMD Cloud Computing Expert"
     dataset_key = ""
+    active_domain = "SWaT"
 
     if data_source == "Upload Custom CSV":
         samples_dir = os.path.join(ROOT_DIR, "data/samples")
@@ -171,14 +240,18 @@ def main():
         else:
             time_index = np.arange(len(raw_data))
 
-        # Context-dependent default model
-        domain_models = {
-            "smd": "SMD Cloud Computing Expert",
-            "swat": "SWaT Water Treatment SCADA Expert",
-            "msl": "MSL Mars Rover Telemetry Expert",
-            "gecco": "GECCO Water Quality Expert"
-        }
-        default_model = next((m for k, m in domain_models.items() if k in dataset_name.lower()), "Universal Foundation (Zero-Shot Cross-Domain)")
+        # Detect target domain
+        name_lower = dataset_name.lower()
+        if "swat" in name_lower:
+            active_domain = "SWaT"
+        elif "gecco" in name_lower:
+            active_domain = "GECCO"
+        elif "smd" in name_lower or "server" in name_lower:
+            active_domain = "SMD"
+        elif "msl" in name_lower or "space" in name_lower:
+            active_domain = "MSL"
+        else:
+            active_domain = "SWaT"
 
         # Collapsible Data Preview
         with st.expander("Preview Uploaded Data Table", expanded=False):
@@ -187,26 +260,26 @@ def main():
     else:
         # Benchmark presets with offsets that contain genuine anomaly episodes
         preset_configs = {
-            "SMD Cloud Computing Server (Crash Incident)": {
-                "ds": "smd", "entity": "machine-1-1", "start": 15000, "len": 3000,
-                "model": "SMD Cloud Computing Expert", "sample_file": "test_server_smd.csv"
-            },
-            "SWaT Water Treatment SCADA (Attack Intervals)": {
+            "SWaT Water Treatment SCADA (Attack Intervals) [51 Sensors]": {
                 "ds": "swat", "entity": "swat_attack", "start": 1500, "len": 3000,
-                "model": "SWaT Water Treatment SCADA Expert", "sample_file": "test_swat_water_scada.csv"
+                "domain": "SWaT", "sample_file": "test_swat_water_scada.csv"
             },
-            "MSL Mars Rover (Telemetry Anomaly)": {
-                "ds": "msl", "entity": "msl_test", "start": 27000, "len": 3000,
-                "model": "MSL Mars Rover Telemetry Expert", "sample_file": "test_spacecraft_msl.csv"
-            },
-            "GECCO Drinking Water (Chemical Drift)": {
+            "GECCO Drinking Water (Chemical Drift) [9 Sensors]": {
                 "ds": "gecco", "entity": "gecco_water", "start": 60000, "len": 2500,
-                "model": "GECCO Water Quality Expert", "sample_file": "test_gecco_water.csv"
+                "domain": "GECCO", "sample_file": "test_gecco_water.csv"
+            },
+            "SMD Cloud Computing Server (Crash Incident) [38 Metrics]": {
+                "ds": "smd", "entity": "machine-1-1", "start": 15000, "len": 3000,
+                "domain": "SMD", "sample_file": "test_server_smd.csv"
+            },
+            "MSL Mars Rover (Telemetry Anomaly) [55 Channels]": {
+                "ds": "msl", "entity": "msl_test", "start": 27000, "len": 3000,
+                "domain": "MSL", "sample_file": "test_spacecraft_msl.csv"
             }
         }
         preset_choice = st.sidebar.selectbox("Choose Benchmark Dataset:", list(preset_configs.keys()))
         cfg = preset_configs[preset_choice]
-        default_model = cfg["model"]
+        active_domain = cfg["domain"]
         dataset_name = preset_choice
         dataset_key = f"preset_{preset_choice}"
 
@@ -224,44 +297,109 @@ def main():
             raw_data = full_raw[st_idx:ed_idx]
             ground_truth = full_labels[st_idx:ed_idx]
             time_index = np.arange(len(raw_data))
-            feature_names = [f"Ch {i}" for i in range(raw_data.shape[1])]
+            feature_names = get_feature_names_for_dataset(cfg["ds"], raw_data.shape[1])
             
-            bs_steps = min(3000, len(full_raw))
-            clean_base_m = np.mean(full_raw[:bs_steps], axis=0)
-            clean_base_s = np.maximum(np.std(full_raw[:bs_steps], axis=0), 0.05)
+            # Load reference baseline from training split if available
+            train_entity = {
+                "swat": "swat_normal",
+                "msl": "msl_train",
+            }.get(cfg["ds"])
+            if train_entity:
+                try:
+                    train_raw, _ = load_dataset_arrays(cfg["ds"], train_entity, data_dir)
+                    clean_base_m = np.mean(train_raw, axis=0)
+                    clean_base_s = np.std(train_raw, axis=0)
+                    clean_base_s = np.where(clean_base_s == 0, 1.0, clean_base_s)
+                    clean_base_s = np.maximum(clean_base_s, 0.05)
+                except Exception:
+                    clean_base_m = None
+                    clean_base_s = None
+
+            if clean_base_m is None:
+                # Use standard first-50% training reference partition for single-file benchmarks (GECCO)
+                ref_len = int(len(full_raw) * 0.50) if cfg["ds"] == "gecco" else min(3000, len(full_raw))
+                clean_base_m = np.mean(full_raw[:ref_len], axis=0)
+                clean_base_s = np.std(full_raw[:ref_len], axis=0)
+                clean_base_s = np.where(clean_base_s == 0, 1.0, clean_base_s)
+                clean_base_s = np.maximum(clean_base_s, 0.05)
         except Exception as e:
             st.error(f"Error loading benchmark dataset '{preset_choice}': {e}")
             return
 
-    # Sidebar: Model Selection
+    # Sidebar: Model Selection (Clean, Structured Hierarchical Selector)
     st.sidebar.header("2. Model Selection")
-    model_choices = list(VisTADServingEngine.AVAILABLE_MODELS.keys())
 
-    # Synchronize default model with dataset selection in session state
-    if "selected_model_name" not in st.session_state:
-        st.session_state["selected_model_name"] = default_model
-        st.session_state["last_dataset_key"] = dataset_key
-
-    if st.session_state.get("last_dataset_key") != dataset_key:
-        st.session_state["last_dataset_key"] = dataset_key
-        st.session_state["selected_model_name"] = default_model
-        if "incident_table" in st.session_state:
-            del st.session_state["incident_table"]
-
-    selected_model_name = st.sidebar.selectbox(
-        "Checkpoint:",
-        model_choices,
-        key="selected_model_name",
-        help="Universal Foundation is trained across all 4 domains for zero-shot testing. Domain experts are specialized baselines."
+    # 1. Paradigm Selector
+    paradigm_options = [
+        "🌐 Zero-Shot Foundation (Cross-Domain)",
+        "🔬 In-Domain Specialized Student",
+        "🏛️ Grand Unified Foundation (All 4 Domains)"
+    ]
+    selected_paradigm_display = st.sidebar.selectbox(
+        "Evaluation Paradigm:",
+        paradigm_options,
+        index=0,
+        help="Zero-Shot Foundation evaluates models that have never seen this target plant during training. In-Domain students are specialized baselines."
     )
+
+    selected_model_key = None
+    if "Zero-Shot" in selected_paradigm_display:
+        # Match Zero-Shot model for active domain
+        zero_shot_map = {
+            "SWaT": "swat_zero_shot",
+            "GECCO": "gecco_zero_shot",
+            "SMD": "smd_zero_shot",
+            "MSL": "msl_zero_shot"
+        }
+        selected_model_key = zero_shot_map.get(active_domain, "swat_zero_shot")
+
+    elif "Grand Unified" in selected_paradigm_display:
+        selected_model_key = "grand_unified"
+
+    else:
+        # In-Domain Specialized Student: Choose Distillation Regimen and Architecture
+        distill_choice = st.sidebar.radio(
+            "Distillation Regimen:",
+            ["✨ Distilled (VLM Teacher Features)", "🚫 Pure Supervised (Non-Distilled)"],
+            index=0,
+            help="Distilled students align their latent space with DINOv2 vision representations. Pure supervised students learn strictly from discrete 0/1 binary labels."
+        )
+        is_distilled = ("Distilled" in distill_choice and "Non-Distilled" not in distill_choice)
+
+        if is_distilled:
+            arch_choices = {
+                f"Subsystem-Coupled TCN (Recommended)": f"{active_domain.lower()}_coupled_distilled",
+                f"Standard Residual-TCN 5L (Top-6 Filtered)": f"{active_domain.lower()}_tcn_distilled"
+            }
+            chosen_arch_label = st.sidebar.selectbox(
+                "Architecture Variant:",
+                list(arch_choices.keys()),
+                index=0
+            )
+            selected_model_key = arch_choices[chosen_arch_label]
+        else:
+            selected_model_key = f"{active_domain.lower()}_tcn_pure"
+
+    catalog = getattr(engine, "MODEL_CATALOG", getattr(VisTADServingEngine, "MODEL_CATALOG", {}))
+    model_cfg = catalog.get(selected_model_key, {})
+
+    # Render Clean Model Specification Card
+    st.sidebar.markdown(f"""
+    <div class="model-spec-card">
+        <b>Checkpoint:</b> <code>{model_cfg.get('file', '-')}</code><br>
+        <b>Architecture:</b> {model_cfg.get('arch_name', '-')}<br>
+        <b>Training Scope:</b> {model_cfg.get('trained_on', '-')}<br>
+        <b>Distillation:</b> {model_cfg.get('distill_type', '-')}<br>
+        <b>Calibrated Cutoff:</b> τ* = {model_cfg.get('default_threshold', 0.50):.4f}
+    </div>
+    """, unsafe_allow_html=True)
 
     # Sidebar: Operating Decision Threshold (Configurable by user, defaults to model-calibrated tau*)
     st.sidebar.header("3. Decision Threshold")
-    model_cfg = VisTADServingEngine.AVAILABLE_MODELS.get(selected_model_name, {})
-    default_tau = float(model_cfg.get("default_threshold", 0.20))
+    default_tau = float(model_cfg.get("default_threshold", 0.50))
 
-    if st.session_state.get("last_model_for_threshold") != selected_model_name:
-        st.session_state["last_model_for_threshold"] = selected_model_name
+    if st.session_state.get("last_model_for_threshold") != selected_model_key:
+        st.session_state["last_model_for_threshold"] = selected_model_key
         st.session_state["tau_slider_value"] = default_tau
 
     operating_tau = st.sidebar.slider(
@@ -272,7 +410,7 @@ def main():
         step=0.005,
         format="%.4f",
         key="tau_slider_value",
-        help=f"Best calibrated default for {selected_model_name}: tau* = {default_tau:.4f}"
+        help=f"Best calibrated default for {model_cfg.get('name')}: tau* = {default_tau:.4f}"
     )
 
     with st.sidebar.expander("Alarm Post-Processing (Hysteresis)", expanded=False):
@@ -282,7 +420,7 @@ def main():
 
     # Load Model Checkpoint
     try:
-        engine.load_model(selected_model_name)
+        engine.load_model(selected_model_key)
     except Exception as e:
         st.error(f"Failed to load checkpoint: {e}")
         return
@@ -302,24 +440,48 @@ def main():
     )
 
     scores = results["continuous_scores"]
+    channel_attrs = results.get("channel_attributions")
+    event_details = results.get("event_details", [])
     operating_tau = results["threshold"]
     preds = results["binary_predictions"]
     detected_events = results["detected_events"]
     selected_ch = results["selected_channels"]
 
+    # Paradigm & Regimen Banners
+    is_zero_shot = (model_cfg.get("paradigm") == "Zero-Shot Foundation")
+    is_pure_supervised = (model_cfg.get("distilled") is False)
+
+    if is_zero_shot:
+        st.markdown(f"""
+        <div class="badge-zeroshot">
+            🎯 <b>Zero-Shot Transfer Evaluation Active:</b> Evaluated on unseen <b>{active_domain}</b> telemetry. This model was trained <i>strictly on external datasets</i> ({model_cfg.get('trained_on')}) and has <b>never seen</b> any training data or anomaly labels from this plant. The continuous probability curve p_system(t) in [0, 1] demonstrates direct cross-domain zero-shot foundation transfer.
+        </div>
+        """, unsafe_allow_html=True)
+    elif is_pure_supervised:
+        st.markdown(f"""
+        <div class="badge-pure">
+            ⚠️ <b>Pure Supervised Ablation Active:</b> This model was trained strictly on discrete 0/1 binary labels without DINOv2 teacher distillation. Without geometric feature regularization, notice the elevated background noise floor and higher sensitivity to spurious sensor fluctuations.
+        </div>
+        """, unsafe_allow_html=True)
+
     # Pre-build incident records
     records = []
-    if detected_events:
-        for idx_e, (st_idx, ed_idx) in enumerate(detected_events):
-            dur = ed_idx - st_idx
-            peak_score = float(np.max(scores[st_idx:ed_idx])) if dur > 0 else scores[st_idx]
+    if event_details:
+        for idx_e, ev in enumerate(event_details):
+            top_sensor_str = "-"
+            if ev.get("top_sensors"):
+                top_ch_idx, top_score = ev["top_sensors"][0]
+                tag_name = feature_names[top_ch_idx] if top_ch_idx < len(feature_names) else f"Ch {top_ch_idx}"
+                top_sensor_str = f"{tag_name} (p={top_score:.2f})"
+
             records.append({
                 "Incident": f"Alarm #{idx_e + 1}",
-                "Start Step": st_idx,
-                "End Step": ed_idx,
-                "Duration": f"{dur} steps",
-                "Peak Score": f"{peak_score:.3f}",
-                "Severity": "CRITICAL" if peak_score > 0.60 else "WARNING"
+                "Start Step": ev["start"],
+                "End Step": ev["end"],
+                "Duration": f"{ev['duration']} steps",
+                "Peak Prob": f"{ev['peak_prob']:.3f}",
+                "Top Root-Cause Sensor": top_sensor_str,
+                "Severity": "CRITICAL" if ev["peak_prob"] > 0.85 else ("HIGH" if ev["peak_prob"] > 0.60 else "WARNING")
             })
 
     # Retrieve interactive table selections
@@ -337,7 +499,7 @@ def main():
             vus = compute_vus_metrics(ground_truth, scores, max_buffer=50)
             eval_metrics = {
                 "auroc": pt.get("auroc", np.nan),
-                "vus_pr": vus.get("vus_pr", np.nan),
+                "prauc": pt.get("prauc", np.nan),
                 "aff_f1": aff.get("aff_f1", np.nan),
                 "aff_p": aff.get("aff_precision", np.nan),
                 "aff_r": aff.get("aff_recall", np.nan)
@@ -356,13 +518,12 @@ def main():
         </div>
         """, unsafe_allow_html=True)
     with k2:
-        model_type_label = "Universal Foundation" if "Universal" in selected_model_name else "Domain Expert"
-        arch_type = "Residual-TCN" if model_cfg.get("arch") == "tcn" else ("TimesNet" if model_cfg.get("arch") == "timesnet" else "CI 1D-CNN")
+        model_type_label = "Zero-Shot Foundation" if is_zero_shot else ("Grand Unified" if "Grand" in model_cfg.get("name", "") else "Specialized Student")
         st.markdown(f"""
         <div class="metric-box">
             <div class="label">Active Model</div>
             <div class="val">{model_type_label}</div>
-            <div class="desc">{arch_type} ({len(selected_ch)} active ch)</div>
+            <div class="desc">{model_cfg.get('arch_name', '')} ({len(selected_ch)} ch)</div>
         </div>
         """, unsafe_allow_html=True)
     with k3:
@@ -395,11 +556,11 @@ def main():
         st.write("")
         st.markdown("**Ground-Truth Benchmark Evaluation Scores**")
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Affiliation F1", fmt_metric(eval_metrics["aff_f1"]))
-        m2.metric("Affiliation Precision", fmt_metric(eval_metrics["aff_p"]))
-        m3.metric("Affiliation Recall", fmt_metric(eval_metrics["aff_r"]))
-        m4.metric("AUROC", fmt_metric(eval_metrics["auroc"]))
-        m5.metric("VUS-PR", fmt_metric(eval_metrics["vus_pr"]))
+        m1.metric("AUROC", fmt_metric(eval_metrics["auroc"]))
+        m2.metric("PR-AUC", fmt_metric(eval_metrics["prauc"]))
+        m3.metric("Affiliation F1", fmt_metric(eval_metrics["aff_f1"]))
+        m4.metric("Affiliation Precision", fmt_metric(eval_metrics["aff_p"]))
+        m5.metric("Affiliation Recall", fmt_metric(eval_metrics["aff_r"]))
 
     # Timeline Header and Optional Clear Selection
     st.write("")
@@ -417,13 +578,13 @@ def main():
 
     # Synchronized Interactive Timeline
     num_rows = 3 if has_ground_truth else 2
-    row_heights = [0.42, 0.40, 0.18] if has_ground_truth else [0.52, 0.48]
+    row_heights = [0.40, 0.42, 0.18] if has_ground_truth else [0.50, 0.50]
     sub_titles = [
         f"Normalized Sensor Telemetry ({dataset_name})", 
-        f"VisTAD Anomaly Likelihood Score vs Decision Threshold (tau = {operating_tau:.3f})"
+        f"VisTAD Continuous Anomaly Probability p_system(t) in [0, 1] vs Threshold (tau = {operating_tau:.3f})"
     ]
     if has_ground_truth:
-        sub_titles.append("Ground Truth Anomaly State [0 = Nominal, 1 = Active Event]")
+        sub_titles.append("Ground Truth Anomaly State [0 = Nominal, 1 = Active Cyber-Physical Attack / Anomaly]")
 
     fig = make_subplots(
         rows=num_rows, cols=1, 
@@ -442,9 +603,9 @@ def main():
             fillcolor="rgba(249, 115, 22, 0.20)", line_width=1, line_color="#f97316"
         )
 
-    # 2. Sensor Traces (Top-2 Most Active Channels)
-    ch_colors = ["#1e293b", "#0284c7", "#0d9488"]
-    for idx_ch, ch in enumerate(selected_ch[:2]):
+    # 2. Sensor Traces (Top-3 Most Active Channels)
+    ch_colors = ["#1e293b", "#0284c7", "#0d9488", "#7c3aed"]
+    for idx_ch, ch in enumerate(selected_ch[:3]):
         s_mean = np.mean(raw_data[:, ch])
         s_std = np.std(raw_data[:, ch]) + 0.05
         norm_ch = (raw_data[:, ch] - s_mean) / s_std
@@ -462,8 +623,10 @@ def main():
     fig.add_trace(
         go.Scatter(
             x=t_axis, y=scores, mode="lines", 
-            name="Anomaly Score s(t)", 
-            line=dict(color="#dc2626", width=1.6)
+            name="Anomaly Probability p(t)", 
+            line=dict(color="#dc2626", width=1.8),
+            fill="tozeroy",
+            fillcolor="rgba(220, 38, 38, 0.08)"
         ),
         row=2, col=1
     )
@@ -473,7 +636,7 @@ def main():
         go.Scatter(
             x=[t_axis[0], t_axis[-1]], y=[operating_tau, operating_tau], mode="lines",
             name=f"Threshold tau ({operating_tau:.3f})",
-            line=dict(color="#2563eb", width=1.5, dash="dash")
+            line=dict(color="#2563eb", width=1.6, dash="dash")
         ),
         row=2, col=1
     )
@@ -483,10 +646,10 @@ def main():
         fig.add_trace(
             go.Scatter(
                 x=t_axis, y=ground_truth, mode="lines",
-                name="Ground Truth y(t)",
-                line=dict(shape="hv", color="#dc2626", width=2),
+                name="Ground Truth Attack y(t)",
+                line=dict(shape="hv", color="#b91c1c", width=2),
                 fill="tozeroy",
-                fillcolor="rgba(220, 38, 38, 0.15)"
+                fillcolor="rgba(185, 28, 28, 0.20)"
             ),
             row=3, col=1
         )
@@ -504,7 +667,7 @@ def main():
             fig.add_trace(
                 go.Scatter(
                     x=t_axis, y=sel_mask, mode="lines",
-                    name="Selected Incident(s)",
+                    name="Selected Incident",
                     line=dict(shape="hv", color="#1d4ed8", width=2.5),
                     fill="tozeroy",
                     fillcolor="rgba(37, 99, 235, 0.35)"
@@ -543,22 +706,85 @@ def main():
             )
 
     fig.update_layout(
-        height=660 if has_ground_truth else 540,
+        height=680 if has_ground_truth else 550,
         hovermode="x unified",
         template="plotly_white",
         margin=dict(l=40, r=40, t=40, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     fig.update_yaxes(title_text="Sensor (std)", row=1, col=1)
-    score_top = max(operating_tau * 1.5, float(np.max(scores) * 1.25), 0.25)
-    fig.update_yaxes(title_text="Score", row=2, col=1, range=[0, min(1.05, score_top)])
+    fig.update_yaxes(title_text="Prob p(t)", row=2, col=1, range=[-0.02, 1.05], tickvals=[0.0, 0.25, 0.5, 0.75, 1.0])
     fig.update_xaxes(title_text="Timestep", row=num_rows, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
 
+    # Root Cause Sensor Attribution Section
+    st.subheader("Root-Cause Sensor Attribution")
+    if channel_attrs is not None:
+        if selected_indices:
+            if len(selected_indices) == 1:
+                sel_idx = selected_indices[0]
+                st_step = records[sel_idx]["Start Step"]
+                ed_step = records[sel_idx]["End Step"]
+                attr_title = f"Top Contributing Sensors for {records[sel_idx]['Incident']} (Steps {st_step} to {ed_step})"
+                sensor_scores = np.mean(channel_attrs[:, st_step:ed_step], axis=1)
+            else:
+                inc_names = ", ".join(records[i]["Incident"] for i in selected_indices)
+                attr_title = f"Top Contributing Sensors Across {len(selected_indices)} Selected Incidents ({inc_names})"
+                sel_mask = np.zeros(channel_attrs.shape[1], dtype=bool)
+                for idx in selected_indices:
+                    st_step = records[idx]["Start Step"]
+                    ed_step = records[idx]["End Step"]
+                    sel_mask[st_step:min(ed_step, len(sel_mask))] = True
+                sensor_scores = np.mean(channel_attrs[:, sel_mask], axis=1) if np.any(sel_mask) else np.mean(channel_attrs, axis=1)
+        elif detected_events:
+            attr_title = "Top Contributing Sensors Across All Detected Incidents"
+            mask = np.zeros(len(scores), dtype=bool)
+            for s_e, e_e in detected_events:
+                mask[s_e:e_e] = True
+            sensor_scores = np.mean(channel_attrs[:, mask], axis=1) if np.any(mask) else np.mean(channel_attrs, axis=1)
+        else:
+            attr_title = "Top Suspicious Sensors (Overall Stream Baseline)"
+            sensor_scores = np.mean(channel_attrs, axis=1)
+
+        top_k = min(8, len(sensor_scores))
+        top_sensor_indices = np.argsort(sensor_scores)[::-1][:top_k]
+        top_labels = [feature_names[i] if i < len(feature_names) else f"Ch {i}" for i in top_sensor_indices]
+        top_values = [float(sensor_scores[i]) for i in top_sensor_indices]
+
+        col_bar, col_detail = st.columns([3, 2])
+        with col_bar:
+            fig_bar = go.Figure(go.Bar(
+                x=top_values[::-1],
+                y=top_labels[::-1],
+                orientation='h',
+                marker=dict(color="#0284c7")
+            ))
+            fig_bar.update_layout(
+                title=attr_title,
+                xaxis_title="Attribution Anomaly Probability p_channel in [0, 1]",
+                yaxis_title="Sensor Tag",
+                xaxis=dict(range=[0, 1.05]),
+                height=280,
+                margin=dict(l=20, r=20, t=35, b=30)
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+        with col_detail:
+            st.markdown(f"**Root-Cause Diagnosis**")
+            st.caption(f"Top sensor **{top_labels[0]}** reached peak probability **{top_values[0]:.3f}**.")
+            st.markdown(f"- **Primary Suspect**: `{top_labels[0]}` (p = {top_values[0]:.3f})")
+            if len(top_labels) > 1:
+                st.markdown(f"- **Secondary Suspect**: `{top_labels[1]}` (p = {top_values[1]:.3f})")
+            if len(top_labels) > 2:
+                st.markdown(f"- **Tertiary Suspect**: `{top_labels[2]}` (p = {top_values[2]:.3f})")
+            st.caption("Cross-channel transformer computes mutual physical correlation to isolate root cause sensors.")
+    else:
+        st.info("Root-cause per-channel attribution is active for Universal-TCN-Pro foundation models.")
+
     # Detected Incidents Ledger
+    st.write("")
     st.subheader("Detected Incidents Ledger")
-    st.caption("Select rows to mark their intervals in the ground truth graph above.")
+    st.caption("Select one or more rows below (click with Shift / Cmd / Ctrl to multi-select) to highlight intervals and compare root-cause sensors.")
     if detected_events:
         df_records = pd.DataFrame(records)
         st.dataframe(

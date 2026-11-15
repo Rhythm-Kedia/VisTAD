@@ -49,7 +49,7 @@ def parse_args():
 
 
 def load_gecco_data(data_path="data/gecco/gecco_water.csv"):
-    """Loads GECCO data and computes nominal baseline statistics from first 16,000 steps."""
+    """Loads GECCO data and computes nominal baseline statistics from Partition 1 nominal slice."""
     if not os.path.exists(data_path):
         candidates = [
             "data/gecco/gecco_water.csv",
@@ -68,10 +68,12 @@ def load_gecco_data(data_path="data/gecco/gecco_water.csv"):
     labels = df["attack"].values.astype(np.int64) if "attack" in df.columns else np.zeros(len(df), dtype=np.int64)
     data = df[GECCO_SENSORS].values.astype(np.float32)
 
-    # First 16,000 steps are 100% nominal (ground-truth baseline)
-    base_slice = data[:16000]
-    base_m = np.mean(base_slice, axis=0)
-    base_s = np.maximum(np.std(base_slice, axis=0), 1e-4)
+    # First 70,000 steps nominal slice (ground-truth training partition baseline)
+    p1_slice = data[:70000]
+    p1_labels = labels[:70000]
+    nom_mask = (p1_labels == 0)
+    base_m = np.mean(p1_slice[nom_mask], axis=0)
+    base_s = np.maximum(np.std(p1_slice[nom_mask], axis=0), 1e-4)
 
     print(f"Loaded {len(data)} steps, {len(GECCO_SENSORS)} channels. Total anomalies: {labels.sum()} ({100*labels.mean():.2f}%)")
     return data, labels, base_m, base_s
@@ -80,10 +82,17 @@ def load_gecco_data(data_path="data/gecco/gecco_water.csv"):
 class UltraVETimeGeccoTeacher:
     """Ultra-VETime Teacher for GECCO:
     - Backbone: facebook/dinov2-large (24 layers, 1024-dim features)
-    - K=5 Nominal Operating Regime Centroids from 16,000-step nominal baseline
+    - K=5 Nominal Operating Regime Centroids from Partition 1 nominal baseline
     - 4-Panel Dual-Subsystem Dashboard Renderer
     """
-    def __init__(self, model_id="facebook/dinov2-large", device="cuda" if torch.cuda.is_available() else "cpu", n_regimes=5):
+    def __init__(self, model_id="facebook/dinov2-large", device=None, n_regimes=5):
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
         self.device = device
         self.model_id = model_id
         self.n_regimes = n_regimes
@@ -96,11 +105,13 @@ class UltraVETimeGeccoTeacher:
         self.regimes_patch = None
         self.nominal_dist_mean = 0.0
         self.nominal_dist_std = 1.0
+        self.cal_threshold = 0.0
 
-    def calibrate(self, data, base_m, base_s, n_calibration_windows=60):
-        """Calibrates K nominal operating centroids and baseline distance statistics."""
+    def calibrate(self, data, labels, base_m, base_s, n_calibration_windows=40):
+        """Calibrates K nominal operating centroids and composite baseline distance statistics."""
         self.renderer = GeccoDashboardRenderer(base_m, base_s)
-        cal_starts = np.linspace(500, 15500, n_calibration_windows, dtype=int)
+        cal_candidates = np.linspace(1000, 68000, n_calibration_windows * 2, dtype=int)
+        cal_starts = [st for st in cal_candidates if labels[st : st + 200].max() == 0][:n_calibration_windows]
 
         imgs = []
         for st in cal_starts:
@@ -118,7 +129,7 @@ class UltraVETimeGeccoTeacher:
                 hs = out.last_hidden_state
                 cls_f = nn.functional.normalize(hs[:, 0, :], p=2, dim=-1)
                 grid = hs[:, 1:, :].reshape(-1, 16, 16, 1024)
-                col_f = nn.functional.normalize(torch.mean(grid[:, :, 8:, :], dim=1), p=2, dim=-1)
+                col_f = nn.functional.normalize(torch.mean(grid, dim=1), p=2, dim=-1)
                 cls_list.append(cls_f)
                 col_list.append(col_f)
 
@@ -141,16 +152,27 @@ class UltraVETimeGeccoTeacher:
             reg_patch.append(nn.functional.normalize(c_patch, p=2, dim=-1))
 
         self.regimes_cls = torch.cat(reg_cls, dim=0)      # [K, 1024]
-        self.regimes_patch = torch.cat(reg_patch, dim=0)  # [K, 8, 1024]
+        self.regimes_patch = torch.cat(reg_patch, dim=0)  # [K, 16, 1024]
 
-        # Compute baseline nominal distance distribution
+        # Compute full composite score ON CALIBRATION DATA to calibrate threshold
         with torch.no_grad():
-            sims = torch.mm(cls_feats, self.regimes_cls.t())  # [N, K]
-            dists = 1.0 - torch.max(sims, dim=1)[0]
-            self.nominal_dist_mean = float(torch.mean(dists).cpu())
-            self.nominal_dist_std = float(torch.std(dists).cpu() + 1e-6)
+            sims = torch.mm(cls_feats, self.regimes_cls.t())
+            max_sims, best_reg = torch.max(sims, dim=1)
+            d_cls = torch.clamp(1.0 - max_sims, min=0.0).cpu().numpy()
 
-        print(f"[Ultra-VETime GECCO] Calibrated {k} regime prototypes. Nominal distance μ={self.nominal_dist_mean:.4f}, σ={self.nominal_dist_std:.4f}")
+            raw_cal = []
+            for b in range(len(imgs)):
+                r_id = best_reg[b]
+                p_sim = torch.sum(col_feats[b] * self.regimes_patch[r_id], dim=-1)
+                p_dist = torch.clamp(1.0 - p_sim, min=0.0).cpu().numpy()
+                raw = 0.4 * float(d_cls[b]) + 0.6 * float(np.max(p_dist))
+                raw_cal.append(raw)
+
+            self.nominal_dist_mean = float(np.mean(raw_cal))
+            self.nominal_dist_std = float(np.std(raw_cal) + 1e-6)
+            self.cal_threshold = self.nominal_dist_mean + 2.0 * self.nominal_dist_std
+
+        print(f"[Ultra-VETime GECCO] Calibrated {k} regime prototypes. Nominal distance μ={self.nominal_dist_mean:.4f}, σ={self.nominal_dist_std:.4f}, Thresh={self.cal_threshold:.4f}")
 
     def score_windows_batch(self, window_data_list):
         """Scores a batch of windows: returns scores, dense_masks, and cls_features."""
@@ -161,7 +183,7 @@ class UltraVETimeGeccoTeacher:
             hs = out.last_hidden_state
             cls_f = nn.functional.normalize(hs[:, 0, :], p=2, dim=-1)
             grid = hs[:, 1:, :].reshape(-1, 16, 16, 1024)
-            col_f = nn.functional.normalize(torch.mean(grid[:, :, 8:, :], dim=1), p=2, dim=-1)
+            col_f = nn.functional.normalize(torch.mean(grid, dim=1), p=2, dim=-1)
 
             # Cosine similarity to nearest regime
             sims_cls = torch.mm(cls_f, self.regimes_cls.t())
@@ -171,7 +193,7 @@ class UltraVETimeGeccoTeacher:
             # Patch temporal projection
             dense_masks = []
             scores = []
-            x_anchors = np.linspace(0, 199, 8)
+            x_anchors = np.linspace(0, 199, 16)
             x_query = np.arange(200)
 
             for b in range(len(imgs)):
@@ -183,8 +205,8 @@ class UltraVETimeGeccoTeacher:
                 dense_masks.append(dense_mask)
 
                 raw_score = 0.4 * float(d_cls[b]) + 0.6 * float(np.max(p_dist))
-                # Sigmoid calibration against nominal stats
-                norm_z = (raw_score - self.nominal_dist_mean) / self.nominal_dist_std
+                # Sigmoid calibration against nominal stats with +2 sigma margin
+                norm_z = (raw_score - self.cal_threshold) / self.nominal_dist_std
                 cal_score = 1.0 / (1.0 + np.exp(-norm_z))
                 scores.append(float(cal_score))
 
@@ -313,10 +335,18 @@ def main():
     # Initialize teacher on available devices
     n_gpus = torch.cuda.device_count()
     teachers_by_device = {}
-    devices = ["cuda:0", "cuda:1"] if n_gpus >= 2 else (["cuda:0"] if n_gpus == 1 else ["cpu"])
+    if n_gpus >= 2:
+        devices = ["cuda:0", "cuda:1"]
+    elif n_gpus == 1:
+        devices = ["cuda:0"]
+    elif torch.backends.mps.is_available():
+        devices = ["mps"]
+    else:
+        devices = ["cpu"]
+
     for d in devices:
         t = UltraVETimeGeccoTeacher(model_id=args.model_id, device=d, n_regimes=args.n_regimes)
-        t.calibrate(data, base_m, base_s, n_calibration_windows=60)
+        t.calibrate(data, labels, base_m, base_s, n_calibration_windows=40)
         teachers_by_device[d] = t
 
     # 1. Training Cache (Partition 1: 0 to 70,000)

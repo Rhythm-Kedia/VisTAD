@@ -79,7 +79,7 @@ class GeccoSubsystemCoupledTCN(nn.Module):
     """Subsystem-Coupled Causal TCN for GECCO drinking water quality anomaly detection."""
 
     def __init__(self, in_channels: int = 9, hidden_dim: int = 64, teacher_feat_dim: int = 1024,
-                 kernel_size: int = 5, dilations: list[int] | None = None, dropout: float = 0.1):
+                 kernel_size: int = 5, dilations: list[int] | None = None, dropout: float = 0.1, **kwargs):
         super().__init__()
         if dilations is None:
             dilations = [1, 2, 4, 8, 16]
@@ -150,6 +150,7 @@ class GeccoSubsystemCoupledTCN(nn.Module):
             "pred_dense": pred_dense,
             "window_score": window_score,
             "logits": window_score,
+            "pred_feature": student_feat,
             "student_feat": student_feat,
             "z_student": student_feat
         }

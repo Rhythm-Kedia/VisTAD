@@ -70,7 +70,7 @@ class CausalVolatilityPrior(nn.Module):
 class MSLCoupledTCNStudent(nn.Module):
     """Dual-Stream Telemetry-Command Coupled Causal TCN with Causal Volatility Prior for NASA MSL."""
     def __init__(self, in_channels=55, hidden_dim=64, teacher_feat_dim=1024, dropout=0.05,
-                 vol_window=50, vol_threshold=0.60, vol_k=3.0):
+                 vol_window=50, vol_threshold=0.60, vol_k=3.0, **kwargs):
         super().__init__()
         self.in_channels = in_channels
         self.hidden_dim = hidden_dim
