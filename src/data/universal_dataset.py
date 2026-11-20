@@ -93,7 +93,7 @@ class SyntheticAnomalyGenerator:
 class UniversalWindowDataset(Dataset):
     """Sliding-window dataset for an arbitrary C-channel multivariate time series with causal prefix buffer."""
     def __init__(self, data: np.ndarray, labels: np.ndarray = None, window_size: int = 200, 
-                 prefix_len: int = 100, stride: int = 10, augment_synthetic: bool = False, 
+                 prefix_len: int = 250, stride: int = 10, augment_synthetic: bool = False, 
                  subsample_channels_range: tuple = None, 
                  fixed_channel_indices: list[int] = None,
                  teacher_cache: dict = None, seed: int = 42):
@@ -129,6 +129,15 @@ class UniversalWindowDataset(Dataset):
                             self.teacher_windows[int(st_idx)] = v
 
         self.cached_starts = np.array(sorted(self.teacher_windows.keys())) if len(self.teacher_windows) > 0 else np.array([], dtype=int)
+        
+        # Auto-detect teacher feature dimensionality (e.g. 1024-d Ultra-VETime vs 2048-d early VLM)
+        self.teacher_dim = 1024
+        if len(self.teacher_windows) > 0:
+            first_w = next(iter(self.teacher_windows.values()))
+            cand = first_w.get("z_teacher", first_w.get("z_feature", None))
+            if cand is not None:
+                self.teacher_dim = int(cand.shape[0]) if hasattr(cand, "shape") else len(cand)
+
         self.indices = list(range(0, len(self.data) - self.window_size + 1, self.stride))
 
     def __len__(self):
@@ -174,9 +183,9 @@ class UniversalWindowDataset(Dataset):
             full_y_dense[self.prefix_len:] = np.maximum(full_y_dense[self.prefix_len:], synth_dense)
             window_y = float(max(window_y, synth_win))
 
-        # Teacher supervision lookup
+        # Teacher supervision lookup (polymorphic across 1024-d and 2048-d caches)
         has_teacher = 0.0
-        z_teacher = torch.zeros(1024, dtype=torch.float32)
+        z_teacher = torch.zeros(self.teacher_dim, dtype=torch.float32)
         teacher_score = 0.0
 
         target_st = None
@@ -196,9 +205,14 @@ class UniversalWindowDataset(Dataset):
 
         if target_st is not None and target_st in self.teacher_windows:
             w_info = self.teacher_windows[target_st]
-            if "z_teacher" in w_info:
-                z_teacher = w_info["z_teacher"].clone().detach().float()
-                teacher_score = float(w_info.get("teacher_score", 0.0))
+            feat_cand = w_info.get("z_teacher", w_info.get("z_feature", None))
+            score_cand = w_info.get("teacher_score", w_info.get("anomaly_likelihood", 0.0))
+            if feat_cand is not None:
+                if torch.is_tensor(feat_cand):
+                    z_teacher = feat_cand.clone().detach().float()
+                else:
+                    z_teacher = torch.tensor(feat_cand, dtype=torch.float32)
+                teacher_score = float(score_cand)
                 has_teacher = 1.0
 
         return {
@@ -207,7 +221,7 @@ class UniversalWindowDataset(Dataset):
             "y_dense": torch.from_numpy(full_y_dense).float(),       # [L_total]
             "y_window": torch.tensor(window_y).float(),              # scalar
             "prefix_len": self.prefix_len,
-            "z_teacher": z_teacher,                                  # [1024]
+            "z_teacher": z_teacher,                                  # [teacher_dim]
             "teacher_score": torch.tensor(teacher_score).float(),    # scalar
             "has_teacher": torch.tensor(has_teacher).float(),        # scalar
             "num_channels": full_x.shape[0]
@@ -215,13 +229,14 @@ class UniversalWindowDataset(Dataset):
 
 
 class UniversalCollate:
-    """Batch collator that applies coordinated channel subsampling across all samples in a batch.
+    """Batch collator that applies coordinated channel subsampling and permutation across all samples in a batch.
     
-    Guarantees all B samples in the batch share the exact same retained channel indices,
+    Guarantees all B samples in the batch share the exact same retained and permuted channel indices,
     producing a well-formed [B, C_sub, L] tensor without artificial padding.
     """
-    def __init__(self, subsample_range: tuple = None, seed: int = 42):
+    def __init__(self, subsample_range: tuple = None, shuffle_channels: bool = False, seed: int = 42):
         self.subsample_range = subsample_range
+        self.shuffle_channels = shuffle_channels
         self.rng = np.random.default_rng(seed)
 
     def __call__(self, batch: list[dict]) -> dict:
@@ -231,10 +246,17 @@ class UniversalCollate:
             min_f, max_f = self.subsample_range
             frac = self.rng.uniform(min_f, max_f)
             num_keep = max(3, int(base_c * frac))
-            keep_idx = sorted(self.rng.choice(base_c, size=num_keep, replace=False))
+            if self.shuffle_channels:
+                keep_idx = list(self.rng.permutation(base_c)[:num_keep])
+            else:
+                keep_idx = sorted(self.rng.choice(base_c, size=num_keep, replace=False))
             x_list = [item["x"][keep_idx, :] for item in batch]
         else:
-            x_list = [item["x"] for item in batch]
+            if self.shuffle_channels:
+                perm_idx = list(self.rng.permutation(base_c))
+                x_list = [item["x"][perm_idx, :] for item in batch]
+            else:
+                x_list = [item["x"] for item in batch]
 
         return {
             "st": torch.tensor([item["st"] for item in batch], dtype=torch.long),

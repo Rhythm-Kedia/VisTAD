@@ -24,6 +24,11 @@ except ImportError:
     UniversalCyberPhysicalTCN = None
     UniversalFoundationTCN_Pro = None
 
+try:
+    from .universal_tcn_channel_aware import UniversalTCNChannelAwareStudent
+except ImportError:
+    UniversalTCNChannelAwareStudent = None
+
 STUDENT_MODELS = {
     "cnn_1d": CNN1DStudent,
     "tcn": lambda in_channels, **kwargs: CNN1DStudent(in_channels=in_channels, use_residual=True, **kwargs),
@@ -34,6 +39,8 @@ STUDENT_MODELS = {
     "msl_coupled_tcn": lambda **kwargs: MSLCoupledTCNStudent(**kwargs),
     "universal_tcn": lambda **kwargs: UniversalCyberPhysicalTCN(**kwargs),
     "universal_foundation_pro": lambda **kwargs: UniversalFoundationTCN_Pro(**kwargs),
+    "msl_universal_pro": lambda **kwargs: UniversalTCNChannelAwareStudent(**kwargs),
+    "universal_channel_aware": lambda **kwargs: UniversalTCNChannelAwareStudent(**kwargs),
     "bilstm": BiLSTMStudent,
     "timesnet": TimesNetStudent
 }
@@ -53,6 +60,8 @@ def build_student(name: str, in_channels: int = 51, **kwargs):
         return MSLCoupledTCNStudent(**kwargs)
     if name in ["universal_tcn", "universal_foundation_pro"]:
         return UniversalFoundationTCN_Pro(**kwargs)
+    if name in ["msl_universal_pro", "universal_channel_aware"]:
+        return UniversalTCNChannelAwareStudent(in_channels=in_channels, **kwargs)
     return STUDENT_MODELS[name](in_channels=in_channels, **kwargs)
 
-__all__ = ["CNN1DStudent", "BiLSTMStudent", "TimesNetStudent", "StageCoupledTCNStudent", "SMDSubsystemCoupledTCN", "UniversalCyberPhysicalTCN", "build_student", "STUDENT_MODELS"]
+__all__ = ["CNN1DStudent", "BiLSTMStudent", "TimesNetStudent", "StageCoupledTCNStudent", "SMDSubsystemCoupledTCN", "UniversalCyberPhysicalTCN", "UniversalTCNChannelAwareStudent", "build_student", "STUDENT_MODELS"]

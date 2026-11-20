@@ -127,13 +127,14 @@ class MSLCoupledTCNStudent(nn.Module):
         std = torch.sqrt(torch.clamp(m2 - m**2, min=0.0) + 1e-8)
         return torch.cat([z0, z_tanh, diff, std], dim=1)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         """
         Args:
             x: Tensor of shape (B, in_channels, L) or (B, L, in_channels).
         Returns:
             dict with:
                 pred_dense: (B, L) dual-prior point-wise anomaly probabilities in [0, 1]
+                p_system: (B, L) alias for pred_dense
                 p_tcn: (B, L) deep coupled TCN point probabilities
                 p_vol: (B, L) causal volatility prior point probabilities
                 pred_scalar: (B,) window anomaly score in [0, 1]
@@ -190,9 +191,15 @@ class MSLCoupledTCNStudent(nn.Module):
         
         return {
             "pred_dense": pred_dense,
+            "p_system": pred_dense,
             "p_tcn": p_tcn,
             "p_vol": p_vol,
             "pred_scalar": pred_scalar,
             "pred_feature": pred_feat,
             "dense_logits": dense_logits,
         }
+
+
+# Alias for cross-ablation suites
+MSLCoupledTCN = MSLCoupledTCNStudent
+

@@ -118,12 +118,13 @@ class StageCoupledTCNStudent(nn.Module):
             nn.Linear(256, feat_dim)
         )
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         """
         x: [B, 51, L] (or [B, L, 51] if passed in batch format)
         Returns:
             dict containing:
             - pred_dense: [B, L] point-wise probabilities in [0, 1]
+            - p_system: [B, L] alias for pred_dense
             - window_score: [B] scalar window anomaly score in [0, 1]
             - student_feat: [B, 1024] normalized latent embedding
         """
@@ -159,6 +160,12 @@ class StageCoupledTCNStudent(nn.Module):
 
         return {
             "pred_dense": pred_dense,
+            "p_system": pred_dense,
             "window_score": window_score,
             "student_feat": student_feat
         }
+
+
+# Alias for cross-ablation suites
+StageCoupledTCN = StageCoupledTCNStudent
+

@@ -107,7 +107,7 @@ class CNN1DStudent(nn.Module):
             return h
         return self.backbone(x)
         
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         if self.channel_independent:
             B, K, L = x.shape
             x_ci = x.reshape(B * K, 1, L)
@@ -127,11 +127,15 @@ class CNN1DStudent(nn.Module):
             
             # Feature representation pooled over time and channels
             h_pooled = torch.mean(h_ci.reshape(B, K, -1, L).mean(dim=1), dim=-1)
-            proj_feat = self.feat_projector(h_pooled)
+            proj_feat = F.normalize(self.feat_projector(h_pooled), p=2, dim=-1)
             
             return {
+                "pred_dense": dense_probs,
+                "p_system": dense_probs,
                 "score_scalar": score_scalar,
                 "logits_dense": dense_probs,
+                "pred_feature": proj_feat,
+                "z_student": proj_feat,
                 "features": proj_feat
             }
         else:
@@ -146,10 +150,14 @@ class CNN1DStudent(nn.Module):
             score_scalar = 0.4 * max_p + 0.3 * top_p + 0.3 * mean_p
             
             h_pooled = torch.mean(h, dim=-1)
-            proj_feat = self.feat_projector(h_pooled)
+            proj_feat = F.normalize(self.feat_projector(h_pooled), p=2, dim=-1)
             
             return {
+                "pred_dense": dense_probs,
+                "p_system": dense_probs,
                 "score_scalar": score_scalar,
                 "logits_dense": dense_probs,
+                "pred_feature": proj_feat,
+                "z_student": proj_feat,
                 "features": proj_feat
             }

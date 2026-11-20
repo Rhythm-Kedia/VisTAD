@@ -113,7 +113,7 @@ class GeccoSubsystemCoupledTCN(nn.Module):
             nn.Linear(hidden_dim * 4, teacher_feat_dim)
         )
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
         # Handle input shape: [B, L, C] -> [B, C, L]
         if x.dim() == 3 and x.shape[1] != 9 and x.shape[2] == 9:
             x = x.transpose(1, 2)
@@ -148,9 +148,15 @@ class GeccoSubsystemCoupledTCN(nn.Module):
 
         return {
             "pred_dense": pred_dense,
+            "p_system": pred_dense,
             "window_score": window_score,
             "logits": window_score,
             "pred_feature": student_feat,
             "student_feat": student_feat,
             "z_student": student_feat
         }
+
+
+# Alias for cross-ablation suites
+GeccoCoupledTCN = GeccoSubsystemCoupledTCN
+

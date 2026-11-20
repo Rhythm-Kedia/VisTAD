@@ -88,7 +88,6 @@ class ServerSubsystemEncoder(nn.Module):
 
 class CausalServerPhysicalPrior(nn.Module):
     """Causal physical shock prior evaluating high-pass deviations across server subsystems."""
-
     def __init__(self):
         super().__init__()
 
@@ -154,7 +153,7 @@ class SMDSubsystemCoupledTCN(nn.Module):
 
         return torch.cat([x_sub, delta, diff_avg], dim=1)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
         # Handle input shape: [B, L, C] -> [B, C, L]
         if x.dim() == 3 and x.shape[1] != 38 and x.shape[2] == 38:
             x = x.transpose(1, 2)
@@ -172,7 +171,7 @@ class SMDSubsystemCoupledTCN(nn.Module):
         p_mem, h_mem = self.enc_mem(f_mem)
         p_net, h_net = self.enc_net(f_net)
         p_disk, h_disk = self.enc_disk(f_disk)
-
+        
         # 3. Causal Physical Prior
         p_prior = self.physical_prior(x)
 
@@ -191,6 +190,7 @@ class SMDSubsystemCoupledTCN(nn.Module):
 
         return {
             "pred_dense": pred_dense,
+            "p_system": pred_dense,
             "p_cpu": p_cpu,
             "p_mem": p_mem,
             "p_net": p_net,
@@ -201,3 +201,8 @@ class SMDSubsystemCoupledTCN(nn.Module):
             "student_feat": student_feat,
             "z_student": student_feat
         }
+
+
+# Alias for cross-ablation suites
+SMDCoupledTCN = SMDSubsystemCoupledTCN
+

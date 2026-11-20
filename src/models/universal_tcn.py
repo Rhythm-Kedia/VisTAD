@@ -112,11 +112,14 @@ class UniversalFoundationTCN_Pro(nn.Module):
     """
     def __init__(self, hidden_dim: int = 128, num_heads: int = 8, num_layers: int = 2,
                  ffn_dim: int = 512, kernel_size: int = 5,
-                 dilations: tuple = (1, 2, 4, 8, 16, 32), dropout: float = 0.1):
+                 dilations: tuple = (1, 2, 4, 8, 16, 32), dropout: float = 0.1,
+                 top_k: int = 5, teacher_dim: int = 1024):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
+        self.top_k = top_k
+        self.teacher_dim = teacher_dim
         
         # 1. Channel-Independent Causal Temporal Backbone (Receptive Field L_RF = 253)
         self.temporal_encoder = ChannelIndependentTemporalBackbone(
@@ -144,12 +147,12 @@ class UniversalFoundationTCN_Pro(nn.Module):
         self.pred_head = nn.Conv1d(hidden_dim, 1, kernel_size=1)
 
         # 5. Dimension-Invariant VLM Feature Distillation Head
-        # Projects pooled cross-channel relational state into 1024-dim DINOv2 manifold
+        # Projects pooled cross-channel relational state into DINOv2 / VLM feature manifold (1024-d or 2048-d)
         self.vlm_proj_head = nn.Sequential(
             nn.Linear(hidden_dim, 512),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(512, 1024)
+            nn.Linear(512, teacher_dim)
         )
 
     def extract_triplet_features(self, x: torch.Tensor) -> torch.Tensor:
@@ -170,7 +173,7 @@ class UniversalFoundationTCN_Pro(nn.Module):
         triplets = torch.stack([x, velocity, deviation], dim=2)
         return triplets.view(B * C, 3, L)
 
-    def forward(self, x: torch.Tensor, prefix_len: int = 0) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, prefix_len: int = 0, top_k: int | str | None = None) -> dict[str, torch.Tensor]:
         """
         x: [B, C, L] where C is ANY dimension, L is sequence length.
         prefix_len: length of initial warm-up prefix to exclude from global window score.
@@ -206,7 +209,11 @@ class UniversalFoundationTCN_Pro(nn.Module):
         
         # 4. Dimension-Invariant Top-K Probabilistic Physical Disjunction
         # Fuses the top-K most suspicious channels at each timestep:
-        actual_k = min(5, C)
+        k_val = top_k if top_k is not None else getattr(self, "top_k", 5)
+        if k_val == "all" or (isinstance(k_val, (int, float)) and k_val >= C):
+            actual_k = C
+        else:
+            actual_k = max(1, min(int(k_val), C))
         top_p, _ = torch.topk(p_channel, k=actual_k, dim=1)            # [B, actual_k, L]
         p_clamped = torch.clamp(top_p, 1e-5, 1.0 - 1e-5)
         p_system = 1.0 - torch.prod(1.0 - p_clamped, dim=1)            # [B, L]

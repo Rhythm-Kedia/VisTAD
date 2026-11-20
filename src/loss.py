@@ -174,37 +174,76 @@ class MultiObjectiveKDLoss(nn.Module):
         return total_loss, losses
 
 
-class SimplifiedDistillationLoss(nn.Module):
-    """Clean 2-term distillation loss without response-matching distortion:
-    L_total = (L_Focal + L_Dice) + alpha * L_Feat
-    where L_Feat is cosine distance between student 1024-dim embedding and DINOv2-Large feature.
+class UnifiedFoundationLoss(nn.Module):
+    """Unified, simplified 2-term loss for Grand Foundation and specialized student models.
+    
+    Eliminates arbitrary hyperparameter bloat (zero response distillation or auxiliary prediction losses).
+    Supports clean ablation modes:
+    - 'bce': Standard point-wise Binary Cross-Entropy
+    - 'focal': Focal BCE (gamma=2.0, pos_weight=2.0)
+    - 'focal_dice': Focal BCE + Temporal Soft-Dice
+    - 'unified_distill': (Focal + Dice) + alpha * L_Feat
+    - 'bce_feat': BCE + alpha * L_Feat
     """
-    def __init__(self, alpha=0.1, gamma=2.0, pos_weight=2.0):
+    def __init__(self, mode: str = "unified_distill", alpha: float = 0.1, gamma: float = 2.0, 
+                 pos_weight: float = 2.0, eps: float = 1e-6):
         super().__init__()
+        self.mode = mode.lower().strip()
         self.alpha = float(alpha)
+        self.eps = eps
         self.focal = FocalBCELoss(gamma=gamma, pos_weight=pos_weight)
-        self.dice = TemporalDiceLoss()
+        self.dice = TemporalDiceLoss(eps=eps)
 
-    def forward(self, pred_dense, target_dense, student_feat=None, teacher_feat=None, y_flag=None):
-        l_focal = self.focal(pred_dense, target_dense)
-        l_dice = self.dice(pred_dense, target_dense, y_flag=y_flag)
-        l_seg = l_focal + l_dice
+    def forward(self, pred_dense: torch.Tensor, target_dense: torch.Tensor,
+                student_feat: torch.Tensor = None, teacher_feat: torch.Tensor = None,
+                has_teacher: torch.Tensor = None, y_flag: torch.Tensor = None) -> tuple[torch.Tensor, dict]:
+        p = torch.clamp(pred_dense, self.eps, 1.0 - self.eps)
+        y = target_dense.float()
 
-        if student_feat is not None and teacher_feat is not None:
+        # 1. Base classification term
+        if self.mode in ["bce", "bce_feat"]:
+            l_cls = F.binary_cross_entropy(p, y)
+        else:
+            l_cls = self.focal(p, y)
+
+        # 2. Temporal Soft-Dice term (applied when positive anomaly timesteps exist)
+        if self.mode in ["focal_dice", "unified_distill", "full"]:
+            l_dice = self.dice(p, y, y_flag=y_flag)
+        else:
+            l_dice = torch.tensor(0.0, device=pred_dense.device)
+
+        l_seg = l_cls + l_dice
+
+        # 3. Representation distillation term
+        if self.mode in ["unified_distill", "full", "bce_feat"] and student_feat is not None and teacher_feat is not None:
             s_norm = F.normalize(student_feat, p=2, dim=-1)
             t_norm = F.normalize(teacher_feat, p=2, dim=-1)
             sim = torch.sum(s_norm * t_norm, dim=-1)
-            l_feat = torch.mean(1.0 - sim)
+            if has_teacher is not None:
+                mask = (has_teacher > 0.5).float()
+                if mask.sum() > 0:
+                    l_feat = torch.sum((1.0 - sim) * mask) / torch.clamp(mask.sum(), min=1.0)
+                else:
+                    l_feat = torch.tensor(0.0, device=pred_dense.device)
+            else:
+                l_feat = torch.mean(1.0 - sim)
         else:
             l_feat = torch.tensor(0.0, device=pred_dense.device)
 
         total_loss = l_seg + self.alpha * l_feat
+
         return total_loss, {
             "loss_total": float(total_loss.item()),
-            "loss_focal": float(l_focal.item()),
+            "loss_cls": float(l_cls.item()),
             "loss_dice": float(l_dice.item()),
             "loss_seg": float(l_seg.item()),
             "loss_feat": float(l_feat.item())
         }
+
+
+class SimplifiedDistillationLoss(UnifiedFoundationLoss):
+    """Backward-compatible alias for UnifiedFoundationLoss(mode='unified_distill')."""
+    def __init__(self, alpha=0.1, gamma=2.0, pos_weight=2.0):
+        super().__init__(mode="unified_distill", alpha=alpha, gamma=gamma, pos_weight=pos_weight)
 
 
