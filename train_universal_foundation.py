@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
 
 from src.models.universal_tcn import UniversalCyberPhysicalTCN
 from src.data.universal_dataset import load_dataset_telemetry, UniversalWindowDataset, MultiDatasetBatchSampler, UniversalCollate
+from src.metrics import compute_affiliation_metrics
 
 
 def compute_contiguous_event_recall(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[int, int, float]:
@@ -44,8 +45,8 @@ def compute_contiguous_event_recall(y_true: np.ndarray, y_pred: np.ndarray) -> t
 
 
 def evaluate_continuous_stream(model: nn.Module, test_data: np.ndarray, test_labels: np.ndarray,
-                               window_size: int = 200, prefix_len: int = 100, stride: int = 10, batch_size: int = 128,
-                               fixed_channel_indices: list[int] = None,
+                               window_size: int = 200, prefix_len: int = 250, stride: int = 10, batch_size: int = 128,
+                               fixed_channel_indices: list[int] = None, top_k: int | str | None = None,
                                device: str = "cpu") -> dict:
     """Evaluates continuous streaming telemetry over an unseen dataset with warmed-up causal receptive field."""
     n = len(test_data)
@@ -55,7 +56,7 @@ def evaluate_continuous_stream(model: nn.Module, test_data: np.ndarray, test_lab
         test_data, test_labels, window_size=window_size, prefix_len=prefix_len, stride=stride,
         augment_synthetic=False, fixed_channel_indices=fixed_channel_indices
     )
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=UniversalCollate())
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=UniversalCollate(shuffle_channels=False))
     
     point_scores = np.zeros(n, dtype=np.float32)
     point_counts = np.zeros(n, dtype=np.float32)
@@ -69,15 +70,44 @@ def evaluate_continuous_stream(model: nn.Module, test_data: np.ndarray, test_lab
             st_indices = batch["st"].numpy()
             x = batch["x"].to(device)  # [B, C, L_total]
             if use_autocast:
-                with torch.cuda.amp.autocast(dtype=torch.float16):
-                    out = model(x, prefix_len=prefix_len)
+                try:
+                    with torch.amp.autocast('cuda', dtype=torch.float16):
+                        try:
+                            out = model(x, prefix_len=prefix_len, top_k=top_k)
+                        except TypeError:
+                            try:
+                                out = model(x, prefix_len=prefix_len)
+                            except TypeError:
+                                out = model(x)
+                except Exception:
+                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                        try:
+                            out = model(x, prefix_len=prefix_len, top_k=top_k)
+                        except TypeError:
+                            try:
+                                out = model(x, prefix_len=prefix_len)
+                            except TypeError:
+                                out = model(x)
             else:
-                out = model(x, prefix_len=prefix_len)
+                try:
+                    out = model(x, prefix_len=prefix_len, top_k=top_k)
+                except TypeError:
+                    try:
+                        out = model(x, prefix_len=prefix_len)
+                    except TypeError:
+                        out = model(x)
 
-            if prefix_len > 0:
-                p_sys = out["p_system"][:, prefix_len:].float().cpu().numpy()  # [B, L_target]
+            # Polymorphic resolution of system dense predictions
+            p_sys_tensor = out.get("p_system", out.get("pred_dense", None))
+            if p_sys_tensor is None and "p_channel" in out:
+                p_sys_tensor = out["p_channel"].mean(dim=1)
+            if p_sys_tensor is None:
+                raise KeyError(f"Model output dict missing dense anomaly probability: keys={list(out.keys())}")
+
+            if prefix_len > 0 and p_sys_tensor.shape[-1] == x.shape[-1]:
+                p_sys = p_sys_tensor[:, prefix_len:].float().cpu().numpy()  # [B, L_target]
             else:
-                p_sys = out["p_system"].float().cpu().numpy()
+                p_sys = p_sys_tensor.float().cpu().numpy()
             
             for i, st in enumerate(st_indices):
                 point_scores[st : st + window_size] += p_sys[i]
@@ -122,11 +152,15 @@ def evaluate_continuous_stream(model: nn.Module, test_data: np.ndarray, test_lab
     precision = float(tp / (tp + fp + 1e-12))
     
     det_ev, tot_ev, ev_rec = compute_contiguous_event_recall(y_true, y_pred)
+    aff = compute_affiliation_metrics(y_true, y_pred)
     
     return {
         "auroc": auroc,
         "prauc": prauc,
         "best_f1": best_f1,
+        "aff_f1": aff["aff_f1"],
+        "aff_precision": aff["aff_precision"],
+        "aff_recall": aff["aff_recall"],
         "best_threshold": thresh,
         "precision": precision,
         "point_recall": recall,
@@ -153,11 +187,13 @@ def main():
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--top_k", type=str, default="5",
+                        help="Number of top channels to pool for system anomaly probability: 1, 3, 5, 10, or 'all'")
     parser.add_argument("--seeds", nargs="+", type=int, default=[42],
                         help="List of random seeds for statistical repetitions")
     parser.add_argument("--window_size", type=int, default=200)
-    parser.add_argument("--prefix_len", type=int, default=100,
-                        help="Historical causal receptive field warm-up prefix length")
+    parser.add_argument("--prefix_len", type=int, default=250,
+                        help="Historical causal receptive field warm-up prefix length (L_RF - 1)")
     parser.add_argument("--train_stride", type=int, default=20)
     parser.add_argument("--eval_stride", type=int, default=10)
     parser.add_argument("--eval_every", type=int, default=1,
@@ -173,11 +209,20 @@ def main():
                         help="Enable FP16 automatic mixed precision (AMP) acceleration")
     parser.add_argument("--subsample_train", action="store_true",
                         help="Randomly subsample 40%-100% of channels dynamically during training")
+    parser.add_argument("--shuffle_channels", action="store_true", default=True,
+                        help="Randomly permute channel order in training batches to enforce permutation-equivariance")
     parser.add_argument("--eval_channel_fraction", type=float, default=1.0,
                         help="Fraction of channels to retain at evaluation time (stress-testing sensor dropping)")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--output_json", type=str, default="results/universal_zeroshot_transfer.json")
     args = parser.parse_args()
+
+    parsed_top_k = args.top_k.strip().lower()
+    if parsed_top_k != "all":
+        try:
+            parsed_top_k = int(parsed_top_k)
+        except ValueError:
+            parsed_top_k = 5
 
     if args.device:
         device = args.device
@@ -222,7 +267,7 @@ def main():
                     print(f"  [{name.upper()}] Cache load warning: {e}")
 
         sub_range = (0.4, 1.0) if args.subsample_train else None
-        collate_fn = UniversalCollate(subsample_range=sub_range, seed=42 + len(train_loaders))
+        collate_fn = UniversalCollate(subsample_range=sub_range, shuffle_channels=args.shuffle_channels, seed=42 + len(train_loaders))
         ds = UniversalWindowDataset(
             train_slice_x, train_slice_y,
             window_size=args.window_size,
@@ -258,11 +303,12 @@ def main():
     from src.models.universal_tcn import UniversalFoundationTCN_Pro
     model = UniversalFoundationTCN_Pro(
         hidden_dim=args.hidden_dim, num_heads=args.num_heads, num_layers=args.num_layers,
-        kernel_size=5, dilations=(1, 2, 4, 8, 16, 32), dropout=0.1
+        kernel_size=5, dilations=(1, 2, 4, 8, 16, 32), dropout=0.1,
+        top_k=parsed_top_k
     ).to(device)
     
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nUniversal Foundation Model: {total_params:,} parameters ({total_params/1e6:.2f}M)")
+    print(f"\nUniversal Foundation Model: {total_params:,} parameters ({total_params/1e6:.2f}M) [Top-K: {parsed_top_k}]")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
@@ -270,19 +316,26 @@ def main():
 
     # 4. Training Loop
     print("\n" + "=" * 80)
-    print(f"STARTING UNIVERSAL FOUNDATION PRETRAINING (Epochs: {args.epochs})")
+    print(f"STARTING UNIVERSAL FOUNDATION PRETRAINING (Epochs: {args.epochs}, Top-K: {parsed_top_k})")
     print(f"  Causal Prefix Horizon:  {args.prefix_len} steps")
     print(f"  VLM Feature Distill:    λ_feat = {args.distill_feat_weight}")
     print(f"  VLM Score Distill:      λ_score = {args.distill_score_weight}")
     print(f"  Mixed Precision (AMP):  {scaler is not None}")
+    print(f"  Channel Shuffling:      {args.shuffle_channels}")
     print("=" * 80)
 
     best_zero_shot_auroc = 0.0
     best_results = None
+    epoch_history = []
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
+        tot_loss_dense = 0.0
+        tot_loss_win = 0.0
+        tot_loss_pred = 0.0
+        tot_loss_feat = 0.0
+        tot_loss_distill = 0.0
         n_batches = 0
         t_epoch = time.time()
 
@@ -370,11 +423,33 @@ def main():
                 optimizer.step()
             
             total_loss += loss.item()
+            tot_loss_dense += loss_dense.item()
+            tot_loss_win += loss_win.item()
+            tot_loss_pred += loss_pred.item()
+            tot_loss_feat += loss_feat.item()
+            tot_loss_distill += loss_distill.item()
             n_batches += 1
 
         scheduler.step()
         epoch_time = time.time() - t_epoch
-        avg_loss = total_loss / max(1, n_batches)
+        denom = max(1, n_batches)
+        avg_loss = total_loss / denom
+        avg_dense = tot_loss_dense / denom
+        avg_win = tot_loss_win / denom
+        avg_pred = tot_loss_pred / denom
+        avg_feat = tot_loss_feat / denom
+        avg_distill = tot_loss_distill / denom
+
+        epoch_record = {
+            "epoch": epoch,
+            "train_loss": avg_loss,
+            "loss_dense": avg_dense,
+            "loss_win": avg_win,
+            "loss_pred": avg_pred,
+            "loss_feat": avg_feat,
+            "loss_distill": avg_distill,
+            "epoch_time_sec": epoch_time
+        }
 
         # Zero-Shot Continuous Streaming Evaluation on Unseen Dataset B
         should_eval = (epoch % args.eval_every == 0) or (epoch == args.epochs)
@@ -389,7 +464,10 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            print(f"Epoch [{epoch:2d}/{args.epochs:2d}] ({epoch_time:.1f}s) | Loss: {avg_loss:.4f} | "
+            epoch_record["eval_metrics"] = {k: v for k, v in eval_metrics.items() if k != "point_scores"}
+            epoch_history.append(epoch_record)
+
+            print(f"Epoch [{epoch:2d}/{args.epochs:2d}] ({epoch_time:.1f}s) | Loss: {avg_loss:.4f} (dense:{avg_dense:.4f}, win:{avg_win:.4f}) | "
                   f"Zero-Shot [{eval_name.upper()}]: AUROC={eval_metrics['auroc']:.4f}, "
                   f"PR-AUC={eval_metrics['prauc']:.4f}, F1={eval_metrics['best_f1']:.4f}, "
                   f"Events={eval_metrics['detected_events']}/{eval_metrics['total_events']} ({eval_metrics['event_recall']*100:.1f}%)")
@@ -404,13 +482,17 @@ def main():
                         "hidden_dim": args.hidden_dim,
                         "num_heads": args.num_heads,
                         "num_layers": args.num_layers,
-                        "prefix_len": args.prefix_len
+                        "prefix_len": args.prefix_len,
+                        "top_k": parsed_top_k
                     },
                     "train_datasets": train_names,
                     "eval_dataset": eval_name,
-                    "metrics": eval_metrics
+                    "top_k": parsed_top_k,
+                    "epoch_history": epoch_history,
+                    "metrics": {k: v for k, v in eval_metrics.items() if k != "point_scores"}
                 }, ckpt_path)
         else:
+            epoch_history.append(epoch_record)
             print(f"Epoch [{epoch:2d}/{args.epochs:2d}] ({epoch_time:.1f}s) | Loss: {avg_loss:.4f} (Eval deferred)")
 
     print("\n" + "=" * 80)
@@ -433,7 +515,10 @@ def main():
     payload = {
         "train_datasets": train_names,
         "eval_dataset": eval_name,
+        "top_k": parsed_top_k,
+        "prefix_len": args.prefix_len,
         "num_params": total_params,
+        "epoch_history": epoch_history,
         "zero_shot_metrics": export_metrics
     }
     with open(args.output_json, "w") as f:

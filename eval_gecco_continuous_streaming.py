@@ -308,7 +308,11 @@ def main():
         print("Standardizing continuous stream using checkpoint baseline parameters...")
         norm_full_data = (full_data - base_m) / (base_s + 1e-6)
     else:
-        norm_full_data = full_data
+        print("Checkpoint missing baseline statistics; computing from nominal baseline full_data[:60000]...")
+        nom_slice = full_data[:60000]
+        base_m = np.mean(nom_slice, axis=0)
+        base_s = np.std(nom_slice, axis=0) + 1e-6
+        norm_full_data = (full_data - base_m) / base_s
 
     # 1. Primary Held-Out Evaluation: Partition 2 (Timestamps 70,000 to 139,566)
     p2_data = norm_full_data[70000:]
