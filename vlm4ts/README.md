@@ -76,3 +76,26 @@ python -m vlm4ts.generate_cache --dataset swat --entity swat_attack --num_window
 ```bash
 python -m vlm4ts.benchmark_teachers --dataset swat --entity swat_attack
 ```
+
+### 4. Reproducing Evaluation (All 44 Models)
+To evaluate all 44 models (24 factorial cross-ablation models, 16 baseline models, and 4 loss-tuned models) strictly over the entire held-out continuous test partition without point adjustment:
+
+```bash
+# Ensure ~/.venv is activated (Python 3.12 with MPS / CUDA support)
+source ~/.venv/bin/activate
+
+# Execute continuous streaming inference over entire test partitions:
+python scripts/eval_master_comprehensive_registry.py
+```
+
+- **Evaluated Test Streams**:
+  - `SWaT (51D)`: Entire Partition 2 ($t \in [224,960, 449,919]$, 224,960 continuous seconds, 14 unseen attacks).
+  - `GECCO (9D)`: Entire Partition 2 ($t \in [69,783, 139,566]$, 69,783 continuous seconds, 22 unseen events).
+  - `SMD (38D)`: Chronological last 50% across all 28 servers (354,210 continuous timesteps, 122 unseen events).
+  - `NASA MSL (55D)`: Chronological test stream ($t \in [36,864, 73,729]$, 36,865 continuous steps, 17 unseen episodes).
+- **Metric Outputs**:
+  - Point-wise: Continuous AUROC, PR-AUC, Best Point-$F_1$, Point Precision, Point Recall, FPR at $\tau^*$.
+  - Range-aware: Affiliation $F_1$ (`Aff-F1`), Aff-Precision, Aff-Recall (without artificial point-adjustment credit).
+  - Event-level: Contiguous Event Recall ($\text{detected} / \text{total}$ events and percentage).
+  - Operational: Parameter count, Latency per window (ms), Throughput (win/s), Speedup vs Teacher.
+- **Results Registry**: Saved directly to `results/master_comprehensive_evaluation_registry.json`.
